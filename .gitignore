@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-server/
+
+# Local SQLite database & runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment variables & secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Vercel local CLI files
+.vercel/
+
+# Logs, caches & OS artifacts
+logs/
+*.log
+npm-debug.log*
+coverage/
+.vitest/
+.DS_Store
+Thumbs.db

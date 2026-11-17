@@ -1,0 +1,169 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Arial', 'Segoe UI', 'Liberation Sans', 'DejaVu Sans', system-ui, -apple-system, sans-serif;
+    background-color: #f3f6fa;
+    color: #0f172a;
+  }
+}
+
+/* TipTap / Rich Document Sheet Styling */
+.govflow-prose {
+  font-family: 'Arial', 'Segoe UI', 'Liberation Sans', 'DejaVu Sans', system-ui, -apple-system, sans-serif;
+  color: #1e293b;
+  font-size: 14.5px;
+  line-height: 1.68;
+}
+
+.govflow-prose h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #071d41;
+  border-bottom: 2px solid #1351b4;
+  padding-bottom: 0.35rem;
+  margin-top: 1.4rem;
+  margin-bottom: 0.85rem;
+}
+
+.govflow-prose h2:first-child {
+  margin-top: 0;
+}
+
+.govflow-prose h3 {
+  font-size: 1.03rem;
+  font-weight: 700;
+  color: #1351b4;
+  margin-top: 1.15rem;
+  margin-bottom: 0.5rem;
+}
+
+.govflow-prose h4 {
+  font-size: 0.94rem;
+  font-weight: 700;
+  color: #071d41;
+  margin-top: 0.9rem;
+  margin-bottom: 0.35rem;
+}
+
+.govflow-prose blockquote {
+  border-left: 4px solid #1351b4;
+  background-color: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  border-radius: 0 6px 6px 0;
+  padding: 0.72rem 0.95rem;
+  margin: 0.85rem 0 1.05rem 0;
+  color: #1e293b;
+  font-size: 13.7px;
+  line-height: 1.62;
+  text-align: justify;
+}
+
+.govflow-prose blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+.govflow-prose p {
+  margin-bottom: 0.7rem;
+  text-align: justify;
+}
+
+.govflow-prose ul {
+  list-style-type: disc;
+  padding-left: 1.4rem;
+  margin-bottom: 0.8rem;
+}
+
+.govflow-prose ol {
+  list-style-type: decimal;
+  padding-left: 1.4rem;
+  margin-bottom: 0.8rem;
+}
+
+.govflow-prose li {
+  margin-bottom: 0.35rem;
+  text-align: justify;
+}
+
+.govflow-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.9rem 0 1.15rem 0;
+  font-size: 13px;
+}
+
+.govflow-prose th {
+  background-color: #071d41;
+  color: #ffffff;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #071d41;
+}
+
+.govflow-prose td {
+  padding: 0.48rem 0.65rem;
+  border: 1px solid #cbd5e1;
+  vertical-align: top;
+  text-align: left;
+}
+
+.govflow-prose td p,
+.govflow-prose th p {
+  text-align: left;
+  margin-bottom: 0.25rem;
+}
+
+.govflow-prose td p:last-child,
+.govflow-prose th p:last-child {
+  margin-bottom: 0;
+}
+
+.govflow-prose tbody tr:nth-child(even) {
+  background-color: #f8fafc;
+}
+
+.govflow-prose table.meta-table {
+  margin-top: 0.45rem;
+  margin-bottom: 0.95rem;
+  font-size: 12.8px;
+}
+
+.govflow-prose table.meta-table td:first-child {
+  width: 29%;
+  font-weight: 700;
+  color: #071d41;
+  background-color: #f1f5f9;
+}
+
+.govflow-prose [data-bind] {
+  background-color: rgba(19, 81, 180, 0.06);
+  border-bottom: 1px dashed rgba(19, 81, 180, 0.4);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.govflow-prose img {
+  max-height: 112px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.ProseMirror:focus {
+  outline: none;
+}
+
+.ProseMirror table .selectedCell:after {
+  z-index: 2;
+  position: absolute;
+  content: "";
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(19, 81, 180, 0.12);
+  pointer-events: none;
+}
