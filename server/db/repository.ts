@@ -1601,7 +1601,7 @@ export function updateAiSettings(patch: {
   const upsert = db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
   if (patch.geminiApiKey !== undefined && patch.geminiApiKey !== '***') {
     const validated = validateManualGeminiApiKey(patch.geminiApiKey);
-    if (!validated.ok) {
+    if ('error' in validated) {
       throw new Error(validated.error);
     }
     if (validated.key === '') {

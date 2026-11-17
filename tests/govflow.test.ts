@@ -16,7 +16,6 @@ const tmpDbPath = path.join(os.tmpdir(), `govflow-test-${Date.now()}.db`);
 process.env.GOVFLOW_DB_PATH = tmpDbPath;
 
 import { getDataDir, getDb, isServerlessRuntime } from '../server/db/database.js';
-import vercelHandler from '../api/index.js';
 import {
   approveAndSignPiece,
   createProcess,
@@ -2067,6 +2066,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     process.env.VERCEL = '1';
     delete process.env.GOVFLOW_DATA_DIR;
 
+    const { default: vercelHandler } = await import('../api/index.js');
     const server = http.createServer(vercelHandler);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
 
