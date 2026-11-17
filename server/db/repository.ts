@@ -209,8 +209,21 @@ function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
 // ============================================================
 // INSTITUTIONS
 // ============================================================
-export function listInstitutions(): Institution[] {
+function getFallbackOwnerId(): string {
   const db = getDb();
+  const row = db
+    .prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY created_at ASC LIMIT 1")
+    .get() as { id: string } | undefined;
+  return row?.id || 'admin-01';
+}
+
+export function listInstitutions(ownerUserId?: string): Institution[] {
+  const db = getDb();
+  if (ownerUserId) {
+    return db
+      .prepare('SELECT * FROM institutions WHERE owner_user_id = ? ORDER BY updated_at DESC')
+      .all(ownerUserId) as unknown as Institution[];
+  }
   return db.prepare('SELECT * FROM institutions ORDER BY updated_at DESC').all() as unknown as Institution[];
 }
 
@@ -230,18 +243,20 @@ export function upsertInstitution(data: Partial<Institution> & { id?: string }):
     const updated: Institution = {
       ...existing,
       ...data,
+      owner_user_id: existing.owner_user_id || data.owner_user_id || getFallbackOwnerId(),
       id,
       cnpj: formatCnpj(data.cnpj ?? existing.cnpj),
       updated_at: now
     };
     db.prepare(`
       UPDATE institutions SET
-        cnpj = ?, razao_social = ?, nome_fantasia = ?, endereco_completo = ?,
+        owner_user_id = ?, cnpj = ?, razao_social = ?, nome_fantasia = ?, endereco_completo = ?,
         cep = ?, municipio = ?, uf = ?, telefone = ?, email = ?,
         portal_transparencia_url = ?, logo_data_url = ?, comarca_foro = ?,
         prefeito_nome = ?, updated_at = ?
       WHERE id = ?
     `).run(
+      updated.owner_user_id ?? null,
       updated.cnpj,
       updated.razao_social,
       updated.nome_fantasia,
@@ -264,6 +279,7 @@ export function upsertInstitution(data: Partial<Institution> & { id?: string }):
 
   const created: Institution = {
     id,
+    owner_user_id: data.owner_user_id || getFallbackOwnerId(),
     cnpj: formatCnpj(data.cnpj || ''),
     razao_social: data.razao_social || 'Prefeitura Municipal',
     nome_fantasia: data.nome_fantasia || '',
@@ -283,12 +299,13 @@ export function upsertInstitution(data: Partial<Institution> & { id?: string }):
 
   db.prepare(`
     INSERT INTO institutions (
-      id, cnpj, razao_social, nome_fantasia, endereco_completo, cep, municipio, uf,
+      id, owner_user_id, cnpj, razao_social, nome_fantasia, endereco_completo, cep, municipio, uf,
       telefone, email, portal_transparencia_url, logo_data_url, comarca_foro, prefeito_nome,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     created.id,
+    created.owner_user_id ?? null,
     created.cnpj,
     created.razao_social,
     created.nome_fantasia,
@@ -520,14 +537,15 @@ export function deleteDotacao(id: string): void {
 // ============================================================
 // PROCESSES & PIECES
 // ============================================================
-export function listProcesses(): (ProcurementProcess & {
+export function listProcesses(ownerUserId?: string): (ProcurementProcess & {
   institution_name: string;
   secretaria_nome: string;
   approved_count: number;
   total_active_agents: number;
 })[] {
   const db = getDb();
-  const rows = db.prepare(`
+  const whereClause = ownerUserId ? 'WHERE p.owner_user_id = ?' : '';
+  const sql = `
     SELECT p.*,
       i.nome_fantasia as institution_fantasia,
       i.razao_social as institution_razao,
@@ -537,8 +555,11 @@ export function listProcesses(): (ProcurementProcess & {
     FROM processes p
     LEFT JOIN institutions i ON i.id = p.institution_id
     LEFT JOIN secretarios s ON s.id = p.secretario_id
+    ${whereClause}
     ORDER BY p.updated_at DESC
-  `).all() as any[];
+  `;
+  const stmt = db.prepare(sql);
+  const rows = (ownerUserId ? stmt.all(ownerUserId) : stmt.all()) as any[];
 
   return rows.map((r) => ({
     ...mapProcessRow(r),
@@ -559,7 +580,8 @@ export function createProcess(
   input: Partial<ProcurementProcess> & { institution_id: string }
 ): ProcessBundle {
   const db = getDb();
-  if (!input.institution_id || !getInstitution(input.institution_id)) {
+  const inst = input.institution_id ? getInstitution(input.institution_id) : null;
+  if (!inst) {
     throw new Error('Órgão/Prefeitura informado não encontrado.');
   }
   const now = new Date().toISOString();
@@ -581,9 +603,11 @@ export function createProcess(
   const dotacoesManuais = sanitizeStringList(input.dotacoes_manuais);
   const tipoContratacao = normalizeTipoContratacao(input.tipo_contratacao);
   const tcuAcordaos = sanitizeTcuPrecedents(input.tcu_acordaos_vinculados);
+  const ownerUserId = input.owner_user_id || inst.owner_user_id || getFallbackOwnerId();
 
   const proc: ProcurementProcess = {
     id,
+    owner_user_id: ownerUserId,
     institution_id: input.institution_id,
     secretario_id: input.secretario_id || null,
     dotacao_id: dotacaoIds[0] ?? null,
@@ -616,7 +640,7 @@ export function createProcess(
 
   db.prepare(`
     INSERT INTO processes (
-      id, institution_id, secretario_id, dotacao_id,
+      id, owner_user_id, institution_id, secretario_id, dotacao_id,
       numero_processo_licitatorio, numero_processo_administrativo, titulo_resumido,
       modalidade, modo_disputa, criterio_julgamento, formato_lance, usar_srp,
       demanda_bruta, responsavel_requisitante, cargo_requisitante, valor_estimado_global,
@@ -624,9 +648,10 @@ export function createProcess(
       tipo_contratacao, dotacao_ids_json, dotacoes_manuais_json,
       data_certame, horario_disputa, tcu_acordaos_json,
       status_geral, header_version, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     proc.id,
+    proc.owner_user_id ?? null,
     proc.institution_id,
     proc.secretario_id,
     proc.dotacao_id,
@@ -916,7 +941,7 @@ export function deleteProcess(id: string): boolean {
 
 export function cloneProcess(
   sourceId: string,
-  opts?: { numero_processo_licitatorio?: string; titulo_resumido?: string }
+  opts?: { numero_processo_licitatorio?: string; titulo_resumido?: string; owner_user_id?: string | null }
 ): ProcessBundle {
   const source = getProcess(sourceId);
   if (!source) {
@@ -930,6 +955,7 @@ export function cloneProcess(
     (source.titulo_resumido.endsWith('(Cópia)') ? source.titulo_resumido : `${source.titulo_resumido} (Cópia)`);
 
   const cloned = createProcess({
+    owner_user_id: opts?.owner_user_id ?? source.owner_user_id,
     institution_id: source.institution_id,
     secretario_id: source.secretario_id,
     dotacao_id: source.dotacao_id,
@@ -1471,10 +1497,43 @@ export interface ResolvedAiConfig {
   openaiBaseUrl: string;
 }
 
-export function getAiConfigRaw(): ResolvedAiConfig {
+function readSettingsMap(userId?: string): Map<string, string> {
   const db = getDb();
+  if (userId) {
+    const rows = db
+      .prepare('SELECT key, value FROM user_settings WHERE user_id = ?')
+      .all(userId) as { key: string; value: string }[];
+    return new Map(rows.map((r) => [r.key, r.value]));
+  }
   const rows = db.prepare('SELECT key, value FROM app_settings').all() as { key: string; value: string }[];
-  const map = new Map(rows.map((r) => [r.key, r.value]));
+  return new Map(rows.map((r) => [r.key, r.value]));
+}
+
+function upsertScopedSetting(key: string, value: string, userId?: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  if (userId) {
+    db.prepare(
+      'INSERT INTO user_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+    ).run(userId, key, value, now);
+    return;
+  }
+  db.prepare(
+    'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, value);
+}
+
+function deleteScopedSetting(key: string, userId?: string): void {
+  const db = getDb();
+  if (userId) {
+    db.prepare('DELETE FROM user_settings WHERE user_id = ? AND key = ?').run(userId, key);
+    return;
+  }
+  db.prepare('DELETE FROM app_settings WHERE key = ?').run(key);
+}
+
+export function getAiConfigRaw(userId?: string): ResolvedAiConfig {
+  const map = readSettingsMap(userId);
 
   const provider = normalizeAiProviderMode(map.get('ai_provider') || process.env.AI_PROVIDER);
   const geminiResolution = resolveGeminiCredential(map.get('gemini_api_key') ?? '');
@@ -1573,8 +1632,8 @@ function buildGeminiAuthDetail(res: GeminiCredentialResolution): string {
     : 'Nenhum arquivo .env ou ADC detectado neste host; operando em modo offline pelo Motor Local 14.133.';
 }
 
-export function getPublicAiSettings(): AiSettings {
-  const raw = getAiConfigRaw();
+export function getPublicAiSettings(userId?: string): AiSettings {
+  const raw = getAiConfigRaw(userId);
   return {
     provider: raw.provider,
     effectiveProvider: raw.effectiveProvider,
@@ -1589,63 +1648,69 @@ export function getPublicAiSettings(): AiSettings {
   };
 }
 
-export function updateAiSettings(patch: {
-  provider?: AiProviderMode;
-  geminiApiKey?: string;
-  geminiModel?: string;
-  openaiApiKey?: string;
-  openaiModel?: string;
-  openaiBaseUrl?: string;
-}): AiSettings {
-  const db = getDb();
-  const upsert = db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+export function updateAiSettings(
+  patch: {
+    provider?: AiProviderMode;
+    geminiApiKey?: string;
+    geminiModel?: string;
+    openaiApiKey?: string;
+    openaiModel?: string;
+    openaiBaseUrl?: string;
+  },
+  userId?: string
+): AiSettings {
   if (patch.geminiApiKey !== undefined && patch.geminiApiKey !== '***') {
     const validated = validateManualGeminiApiKey(patch.geminiApiKey);
     if ('error' in validated) {
       throw new Error(validated.error);
     }
     if (validated.key === '') {
-      db.prepare("DELETE FROM app_settings WHERE key = 'gemini_api_key'").run();
+      deleteScopedSetting('gemini_api_key', userId);
     } else if (validated.key !== '***') {
-      upsert.run('gemini_api_key', validated.key);
+      upsertScopedSetting('gemini_api_key', validated.key, userId);
     }
   }
-  if (patch.provider !== undefined) upsert.run('ai_provider', normalizeAiProviderMode(patch.provider));
+  if (patch.provider !== undefined) {
+    upsertScopedSetting('ai_provider', normalizeAiProviderMode(patch.provider), userId);
+  }
   if (patch.geminiModel !== undefined) {
     const cleanModel = normalizeGeminiModelName(patch.geminiModel);
-    upsert.run('gemini_model', cleanModel);
+    upsertScopedSetting('gemini_model', cleanModel, userId);
   }
-  if (patch.openaiApiKey !== undefined && patch.openaiApiKey !== '***') upsert.run('openai_api_key', patch.openaiApiKey.trim());
-  if (patch.openaiModel !== undefined) upsert.run('openai_model', patch.openaiModel.trim());
-  if (patch.openaiBaseUrl !== undefined) upsert.run('openai_base_url', patch.openaiBaseUrl.trim());
+  if (patch.openaiApiKey !== undefined && patch.openaiApiKey !== '***') {
+    upsertScopedSetting('openai_api_key', patch.openaiApiKey.trim(), userId);
+  }
+  if (patch.openaiModel !== undefined) {
+    upsertScopedSetting('openai_model', patch.openaiModel.trim(), userId);
+  }
+  if (patch.openaiBaseUrl !== undefined) {
+    upsertScopedSetting('openai_base_url', patch.openaiBaseUrl.trim(), userId);
+  }
   clearGeminiAuthCache();
-  return getPublicAiSettings();
+  return getPublicAiSettings(userId);
 }
 
 export function resetStoredGeminiCredentials(options?: {
   setAutoProvider?: boolean;
   resetModel?: boolean;
+  userId?: string;
 }): {
   clearedDbKey: boolean;
   envReloaded: boolean;
   settings: AiSettings;
 } {
-  const db = getDb();
-  const existingKeyRow = db
-    .prepare("SELECT value FROM app_settings WHERE key = 'gemini_api_key'")
-    .get() as { value: string } | undefined;
-  const clearedDbKey = Boolean(existingKeyRow);
+  const userId = options?.userId;
+  const map = readSettingsMap(userId);
+  const clearedDbKey = map.has('gemini_api_key');
 
-  db.prepare("DELETE FROM app_settings WHERE key = 'gemini_api_key'").run();
+  deleteScopedSetting('gemini_api_key', userId);
 
   if (options?.setAutoProvider !== false) {
-    db.prepare(
-      "INSERT INTO app_settings (key, value) VALUES ('ai_provider', 'auto') ON CONFLICT(key) DO UPDATE SET value = 'auto'"
-    ).run();
+    upsertScopedSetting('ai_provider', 'auto', userId);
   }
 
   if (options?.resetModel) {
-    db.prepare("DELETE FROM app_settings WHERE key = 'gemini_model'").run();
+    deleteScopedSetting('gemini_model', userId);
   }
 
   clearGeminiAuthCache();
@@ -1654,6 +1719,6 @@ export function resetStoredGeminiCredentials(options?: {
   return {
     clearedDbKey,
     envReloaded,
-    settings: getPublicAiSettings()
+    settings: getPublicAiSettings(userId)
   };
 }

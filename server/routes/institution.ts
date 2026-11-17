@@ -19,9 +19,20 @@ import {
   importSecretarios,
   scrapePortalTransparencia
 } from '../services/scraperService.js';
+import { canAccessInstitution, requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+
+router.use(['/cnpj', '/institutions'], requireAuth);
+router.use('/institutions/:id', (req, res, next) => {
+  const access = canAccessInstitution(String(req.params.id), req.authUser!);
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error });
+    return;
+  }
+  next();
+});
 
 router.get('/cnpj/:cnpj', async (req, res) => {
   try {
@@ -32,8 +43,8 @@ router.get('/cnpj/:cnpj', async (req, res) => {
   }
 });
 
-router.get('/institutions', (_req, res) => {
-  res.json(listInstitutions());
+router.get('/institutions', (req, res) => {
+  res.json(listInstitutions(req.authUser!.id));
 });
 
 router.get('/institutions/:id', (req, res) => {
@@ -48,7 +59,7 @@ router.get('/institutions/:id', (req, res) => {
 
 router.post('/institutions', (req, res) => {
   try {
-    const saved = upsertInstitution(req.body);
+    const saved = upsertInstitution({ ...req.body, owner_user_id: req.authUser!.id });
     res.status(201).json(saved);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -59,7 +70,8 @@ router.put('/institutions/:id', (req, res) => {
   try {
     const existing = getInstitution(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Instituição não encontrada.' });
-    const saved = upsertInstitution({ ...req.body, id: req.params.id });
+    const { owner_user_id: _ignoredOwner, ...rest } = req.body || {};
+    const saved = upsertInstitution({ ...rest, id: req.params.id });
     res.json(saved);
   } catch (err: any) {
     res.status(400).json({ error: err.message });

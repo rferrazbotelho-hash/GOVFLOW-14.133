@@ -73,6 +73,7 @@ export interface LegalAlert {
 
 export interface Institution {
   id: string;
+  owner_user_id?: string | null;
   cnpj: string;
   razao_social: string;
   nome_fantasia: string;
@@ -143,6 +144,7 @@ export interface ParsedPriceResearchResult {
 
 export interface ProcurementProcess {
   id: string;
+  owner_user_id?: string | null;
   institution_id: string;
   secretario_id: string | null;
   dotacao_id: string | null;
@@ -438,3 +440,98 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
     ]
   }
 ];
+
+export type UserRole = 'ADMIN' | 'USER';
+
+export interface UserAccount {
+  id: string;
+  username: string;
+  name: string;
+  email: string;
+  department: string;
+  role: UserRole;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_login_at?: string | null;
+}
+
+export type SupportChannel = 'EMAIL' | 'CHAT';
+export type SupportTicketStatus = 'ABERTO' | 'EM_ATENDIMENTO' | 'RESOLVIDO';
+
+export interface SupportMessage {
+  id: string;
+  ticket_id: string;
+  sender_role: 'USER' | 'ADMIN' | 'SYSTEM';
+  sender_name: string;
+  message: string;
+  created_at: string;
+}
+
+export interface SupportTicket {
+  id: string;
+  user_id?: string | null;
+  requester_name: string;
+  requester_email: string;
+  requester_phone: string;
+  channel: SupportChannel;
+  subject: string;
+  status: SupportTicketStatus;
+  created_at: string;
+  updated_at: string;
+  messages: SupportMessage[];
+}
+
+export interface AppInfo {
+  name: string;
+  version: string;
+  developer: string;
+  support_email: string;
+  support_whatsapp: string;
+  support_whatsapp_digits: string;
+}
+
+export interface AdminUserSummary extends UserAccount {
+  institutions_count: number;
+  processes_count: number;
+  ai_provider: AiProviderMode;
+  ai_model: string;
+}
+
+export interface AdminOverview {
+  stats: {
+    total_users: number;
+    active_users: number;
+    pending_users: number;
+    total_institutions: number;
+    total_processes: number;
+    total_pieces: number;
+    approved_pieces: number;
+    total_tickets: number;
+    open_tickets: number;
+  };
+  users: AdminUserSummary[];
+  institutions: Array<
+    Institution & {
+      owner_username?: string;
+      owner_name?: string;
+    }
+  >;
+  processes: Array<
+    ProcurementProcess & {
+      institution_name: string;
+      secretaria_nome: string;
+      owner_username?: string;
+      owner_name?: string;
+      approved_count: number;
+      total_active_agents: number;
+    }
+  >;
+  audit_logs: Array<
+    AuditLogEntry & {
+      numero_processo_licitatorio?: string;
+      owner_username?: string;
+    }
+  >;
+  tickets: SupportTicket[];
+}

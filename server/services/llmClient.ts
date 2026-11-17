@@ -8,6 +8,7 @@ import {
 } from './geminiAuth.js';
 
 export interface LlmGenerationRequest {
+  userId?: string;
   agentNumber: number;
   agentTitle: string;
   legalBasis: string;
@@ -136,7 +137,7 @@ export async function tryGenerateWithLlm(
   req: LlmGenerationRequest,
   fetchFn: typeof fetch = fetch
 ): Promise<LlmGenerationResult | null> {
-  const cfg = getAiConfigRaw();
+  const cfg = getAiConfigRaw(req.userId);
 
   if (cfg.effectiveProvider === 'local') {
     return null;
@@ -255,10 +256,10 @@ RETORNE EXCLUSIVAMENTE UM JSON VÁLIDO NO SEGUINTE FORMATO (sem texto fora do JS
   return null;
 }
 
-export async function testAiConnectivity(): Promise<AiConnectivityTestResult> {
+export async function testAiConnectivity(userId?: string): Promise<AiConnectivityTestResult> {
   reloadGeminiDotEnv();
   clearGeminiAuthCache();
-  const cfg = getAiConfigRaw();
+  const cfg = getAiConfigRaw(userId);
 
   if (cfg.effectiveProvider === 'local') {
     if (cfg.provider === 'gemini') {

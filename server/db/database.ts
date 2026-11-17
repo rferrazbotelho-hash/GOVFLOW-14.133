@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { hashPassword } from '../services/passwordUtils.js';
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -216,13 +217,76 @@ function migrateSchema(db: DatabaseSync) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL DEFAULT '',
+      department TEXT NOT NULL DEFAULT '',
+      role TEXT NOT NULL DEFAULT 'USER',
+      password_hash TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_login_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS support_tickets (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      requester_name TEXT NOT NULL,
+      requester_email TEXT NOT NULL,
+      requester_phone TEXT NOT NULL DEFAULT '',
+      channel TEXT NOT NULL DEFAULT 'CHAT',
+      subject TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ABERTO',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS support_messages (
+      id TEXT PRIMARY KEY,
+      ticket_id TEXT NOT NULL,
+      sender_role TEXT NOT NULL DEFAULT 'USER',
+      sender_name TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
+    );
   `);
 
   // Migração segura de colunas adicionadas em bancos já existentes
+  const instCols = (
+    db.prepare('PRAGMA table_info(institutions)').all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  if (!instCols.includes('owner_user_id')) {
+    db.exec('ALTER TABLE institutions ADD COLUMN owner_user_id TEXT;');
+  }
+
   const processCols = (
     db.prepare('PRAGMA table_info(processes)').all() as Array<{ name: string }>
   ).map((c) => c.name);
   const missingProcessCols: Array<[string, string]> = [
+    ['owner_user_id', 'TEXT'],
     ['pesquisa_preco_arquivo', "TEXT DEFAULT ''"],
     ['pesquisa_preco_resumo', "TEXT DEFAULT ''"],
     ['pesquisa_preco_itens_json', "TEXT NOT NULL DEFAULT '[]'"],
@@ -241,13 +305,74 @@ function migrateSchema(db: DatabaseSync) {
 
   // Índices operacionais para consultas rápidas em carteiras com centenas de dotações/processos
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_users_username ON users(LOWER(username));
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_institutions_owner ON institutions(owner_user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_secretarios_inst ON secretarios(institution_id, secretaria);
     CREATE INDEX IF NOT EXISTS idx_dotacoes_inst ON dotacoes(institution_id, orgao, unidade_orcamentaria);
+    CREATE INDEX IF NOT EXISTS idx_processes_owner ON processes(owner_user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_processes_inst_updated ON processes(institution_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_pieces_proc_num ON agent_pieces(process_id, agent_number);
     CREATE INDEX IF NOT EXISTS idx_piece_versions_piece_ver ON piece_versions(piece_id, version_number DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_proc_created ON audit_logs(process_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_support_tickets_user ON support_tickets(user_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_support_messages_ticket ON support_messages(ticket_id, created_at ASC);
   `);
+
+  ensureDefaultAdminAndOwnership(db);
+}
+
+function ensureDefaultAdminAndOwnership(db: DatabaseSync): void {
+  const now = new Date().toISOString();
+  let adminRow = db
+    .prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY created_at ASC LIMIT 1")
+    .get() as { id: string } | undefined;
+
+  if (!adminRow) {
+    const adminId = 'admin-01';
+    const adminUser = (process.env.GOVFLOW_ADMIN_USERNAME || 'admin').trim();
+    const adminPass = process.env.GOVFLOW_ADMIN_PASSWORD || 'GovFlow@14133';
+    const adminEmail = (process.env.GOVFLOW_ADMIN_EMAIL || 'rodrigofb@live.com').trim();
+    db.prepare(`
+      INSERT INTO users (
+        id, username, name, email, department, role, password_hash, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'ADMIN', ?, 1, ?, ?)
+    `).run(
+      adminId,
+      adminUser,
+      'Administrador Geral GovFlow',
+      adminEmail,
+      'Administração e Governança',
+      hashPassword(adminPass),
+      now,
+      now
+    );
+    adminRow = { id: adminId };
+  }
+
+  db.prepare(
+    "UPDATE institutions SET owner_user_id = ? WHERE owner_user_id IS NULL OR owner_user_id = ''"
+  ).run(adminRow.id);
+  db.prepare(
+    "UPDATE processes SET owner_user_id = ? WHERE owner_user_id IS NULL OR owner_user_id = ''"
+  ).run(adminRow.id);
+
+  // Copia configurações globais legadas para a conta do administrador caso ainda não possua user_settings
+  const adminSettingsCount = db
+    .prepare('SELECT COUNT(*) as c FROM user_settings WHERE user_id = ?')
+    .get(adminRow.id) as { c: number };
+  if (adminSettingsCount.c === 0) {
+    const globalRows = db.prepare('SELECT key, value FROM app_settings').all() as Array<{
+      key: string;
+      value: string;
+    }>;
+    const upsertUserSetting = db.prepare(
+      'INSERT OR IGNORE INTO user_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)'
+    );
+    for (const r of globalRows) {
+      upsertUserSetting.run(adminRow.id, r.key, r.value, now);
+    }
+  }
 }
 
 // Brasão SVG institucional padrão (editável/substituível pelo upload do usuário)
@@ -277,23 +402,42 @@ function seedInitialDataIfEmpty(db: DatabaseSync) {
   const countRow = db.prepare('SELECT COUNT(*) as total FROM institutions').get() as { total: number };
   if (countRow.total > 0) return;
 
+  const adminRow = db
+    .prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY created_at ASC LIMIT 1")
+    .get() as { id: string } | undefined;
+  const ownerId = adminRow?.id || 'admin-01';
+  seedStarterWorkspaceForUser(db, ownerId, { useCanonicalIds: true });
+}
+
+export function seedStarterWorkspaceForUser(
+  db: DatabaseSync,
+  ownerUserId: string,
+  opts?: { useCanonicalIds?: boolean; requesterName?: string }
+): void {
+  const existing = db
+    .prepare('SELECT COUNT(*) as total FROM institutions WHERE owner_user_id = ?')
+    .get(ownerUserId) as { total: number };
+  if (existing.total > 0) return;
+
   const now = new Date().toISOString();
-  const instId = 'inst-modelo-01';
-  const sec1Id = 'sec-educacao-01';
-  const sec2Id = 'sec-saude-01';
-  const sec3Id = 'sec-admin-01';
-  const dot1Id = 'dot-educacao-01';
-  const dot2Id = 'dot-saude-01';
-  const dot3Id = 'dot-admin-01';
+  const suffix = crypto.randomUUID().slice(0, 8);
+  const instId = opts?.useCanonicalIds ? 'inst-modelo-01' : `inst-${suffix}`;
+  const sec1Id = opts?.useCanonicalIds ? 'sec-educacao-01' : `sec-edu-${suffix}`;
+  const sec2Id = opts?.useCanonicalIds ? 'sec-saude-01' : `sec-sau-${suffix}`;
+  const sec3Id = opts?.useCanonicalIds ? 'sec-admin-01' : `sec-adm-${suffix}`;
+  const dot1Id = opts?.useCanonicalIds ? 'dot-educacao-01' : `dot-edu-${suffix}`;
+  const dot2Id = opts?.useCanonicalIds ? 'dot-saude-01' : `dot-sau-${suffix}`;
+  const dot3Id = opts?.useCanonicalIds ? 'dot-admin-01' : `dot-adm-${suffix}`;
 
   db.prepare(`
     INSERT INTO institutions (
-      id, cnpj, razao_social, nome_fantasia, endereco_completo, cep, municipio, uf,
+      id, owner_user_id, cnpj, razao_social, nome_fantasia, endereco_completo, cep, municipio, uf,
       telefone, email, portal_transparencia_url, logo_data_url, comarca_foro, prefeito_nome,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     instId,
+    ownerUserId,
     '00.000.000/0001-91',
     'MUNICÍPIO DE HORIZONTE AZUL — PODER EXECUTIVO',
     'Prefeitura Municipal de Horizonte Azul',
@@ -420,17 +564,18 @@ function seedInitialDataIfEmpty(db: DatabaseSync) {
   );
 
   // Processo exemplo pronto para iniciar a esteira ou testar imediatamente
-  const procId = 'proc-exemplo-045-2026';
+  const procId = opts?.useCanonicalIds ? 'proc-exemplo-045-2026' : `proc-${suffix}`;
   db.prepare(`
     INSERT INTO processes (
-      id, institution_id, secretario_id, dotacao_id,
+      id, owner_user_id, institution_id, secretario_id, dotacao_id,
       numero_processo_licitatorio, numero_processo_administrativo, titulo_resumido,
       modalidade, modo_disputa, criterio_julgamento, formato_lance, usar_srp,
       demanda_bruta, responsavel_requisitante, cargo_requisitante, valor_estimado_global,
-      status_geral, header_version, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      dotacao_ids_json, status_geral, header_version, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     procId,
+    ownerUserId,
     instId,
     sec1Id,
     dot1Id,
@@ -443,9 +588,10 @@ function seedInitialDataIfEmpty(db: DatabaseSync) {
     'POR_ITEM',
     1,
     'Precisamos resolver a defasagem tecnológica de 12 escolas municipais do ensino fundamental que hoje possuem laboratórios inoperantes ou sem computadores para os alunos e professores utilizarem plataformas pedagógicas digitais, diário eletrônico e avaliações externas. Estimamos necessidade de cerca de 120 estações de trabalho completas e 12 switches gerenciáveis de rede para atender cerca de 2.400 alunos no ano letivo.',
-    'João Paulo Mendes',
+    opts?.requesterName || 'João Paulo Mendes',
     'Diretor de Tecnologia Educacional',
     420000.0,
+    JSON.stringify([dot1Id]),
     'EM_ELABORACAO',
     1,
     now,

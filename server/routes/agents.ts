@@ -8,14 +8,26 @@ import {
   saveManualPieceEdit
 } from '../db/repository.js';
 import { executeAgentStep, executeAllAgentSteps } from '../services/agentEngine.js';
+import { canAccessProcess, requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+
+router.use('/processes', requireAuth);
+router.use('/processes/:id', (req, res, next) => {
+  const access = canAccessProcess(String(req.params.id), req.authUser!);
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error });
+    return;
+  }
+  next();
+});
 
 router.post('/processes/:id/agents/execute-all', async (req, res) => {
   try {
     const result = await executeAllAgentSteps({
       processId: req.params.id,
-      actorName: req.body?.actorName,
+      userId: req.authUser!.id,
+      actorName: req.body?.actorName || req.authUser!.name,
       actorRole: req.body?.actorRole,
       autoApprove: Boolean(req.body?.autoApprove),
       feedback: req.body?.feedback
@@ -31,9 +43,10 @@ router.post('/processes/:id/agents/:num/execute', async (req, res) => {
     const agentNumber = Number(req.params.num);
     const piece = await executeAgentStep({
       processId: req.params.id,
+      userId: req.authUser!.id,
       agentNumber,
       feedback: req.body?.feedback,
-      actorName: req.body?.actorName,
+      actorName: req.body?.actorName || req.authUser!.name,
       estimativaPreliminar:
         req.body?.estimativaPreliminar !== undefined ? Number(req.body.estimativaPreliminar) : undefined,
       dataPretendida: req.body?.dataPretendida,

@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { searchTcuJurisprudence } from '../services/tcuJurisprudence.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+router.use('/tcu', requireAuth);
 
 router.get('/tcu/acordaos', async (req, res) => {
   try {

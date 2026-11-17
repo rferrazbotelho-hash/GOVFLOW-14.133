@@ -9,11 +9,26 @@ import {
   updateProcess
 } from '../db/repository.js';
 import { parsePriceResearchFile } from '../services/priceResearchParser.js';
+import {
+  canAccessInstitution,
+  canAccessProcess,
+  requireAuth
+} from '../middleware/auth.js';
 
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 }
+});
+
+router.use(['/price-research', '/processes'], requireAuth);
+router.use('/processes/:id', (req, res, next) => {
+  const access = canAccessProcess(String(req.params.id), req.authUser!);
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error });
+    return;
+  }
+  next();
 });
 
 router.post('/price-research/parse', upload.single('file'), async (req, res) => {
@@ -56,13 +71,20 @@ router.post('/processes/:id/price-research', upload.single('file'), async (req, 
   }
 });
 
-router.get('/processes', (_req, res) => {
-  res.json(listProcesses());
+router.get('/processes', (req, res) => {
+  res.json(listProcesses(req.authUser!.id));
 });
 
 router.post('/processes', (req, res) => {
   try {
-    const bundle = createProcess(req.body);
+    const instId = String(req.body?.institution_id || '');
+    if (instId) {
+      const access = canAccessInstitution(instId, req.authUser!);
+      if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+      }
+    }
+    const bundle = createProcess({ ...req.body, owner_user_id: req.authUser!.id });
     res.status(201).json(bundle);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Erro ao criar processo.' });
@@ -89,7 +111,8 @@ router.post('/processes/:id/clone', (req, res) => {
   try {
     const bundle = cloneProcess(req.params.id, {
       numero_processo_licitatorio: req.body?.numero_processo_licitatorio,
-      titulo_resumido: req.body?.titulo_resumido
+      titulo_resumido: req.body?.titulo_resumido,
+      owner_user_id: req.authUser!.id
     });
     res.status(201).json(bundle);
   } catch (err: any) {

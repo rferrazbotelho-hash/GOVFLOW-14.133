@@ -1,6 +1,7 @@
 import os from 'node:os';
 import { Router } from 'express';
 import { getDb, isServerlessRuntime } from '../db/database.js';
+import { getUserOnlineTestMode, setUserOnlineTestMode } from '../db/authRepository.js';
 import {
   createProcess,
   getPublicAiSettings,
@@ -10,31 +11,11 @@ import {
 } from '../db/repository.js';
 import { executeAllAgentSteps } from '../services/agentEngine.js';
 import { searchTcuJurisprudence, TCU_JURISPRUDENCE_CATALOG } from '../services/tcuJurisprudence.js';
+import { canAccessInstitution, requireAuth } from '../middleware/auth.js';
 import type { PlatformOnlineStatus } from '../../shared/types.js';
 
 const router = Router();
-
-function getOnlineTestModeEnabled(): boolean {
-  const db = getDb();
-  const row = db.prepare("SELECT value FROM app_settings WHERE key = 'online_test_mode'").get() as
-    | { value: string }
-    | undefined;
-  if (!row) {
-    db.prepare(
-      "INSERT INTO app_settings (key, value) VALUES ('online_test_mode', 'true') ON CONFLICT(key) DO NOTHING"
-    ).run();
-    return true;
-  }
-  return row.value !== 'false';
-}
-
-function setOnlineTestModeEnabled(enabled: boolean): boolean {
-  const db = getDb();
-  db.prepare(
-    "INSERT INTO app_settings (key, value) VALUES ('online_test_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-  ).run(enabled ? 'true' : 'false');
-  return enabled;
-}
+router.use('/platform', requireAuth);
 
 function collectLanUrls(port: number): string[] {
   const urls: string[] = [];
@@ -50,13 +31,13 @@ function collectLanUrls(port: number): string[] {
   return Array.from(new Set(urls));
 }
 
-async function buildOnlineStatus(probeTcu = false): Promise<PlatformOnlineStatus> {
+async function buildOnlineStatus(userId: string, probeTcu = false): Promise<PlatformOnlineStatus> {
   const port = Number(process.env.PORT || 3001);
   const isVercel = Boolean(process.env.VERCEL);
   const host = isVercel ? 'vercel-serverless' : process.env.HOST || '0.0.0.0';
   const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
-  const testMode = getOnlineTestModeEnabled();
-  const ai = getPublicAiSettings();
+  const testMode = getUserOnlineTestMode(userId);
+  const ai = getPublicAiSettings(userId);
 
   let dbOk = false;
   try {
@@ -109,7 +90,7 @@ async function buildOnlineStatus(probeTcu = false): Promise<PlatformOnlineStatus
 router.get('/platform/online-status', async (req, res) => {
   try {
     const probe = req.query.probe === '1' || req.query.probe === 'true';
-    const status = await buildOnlineStatus(probe);
+    const status = await buildOnlineStatus(req.authUser!.id, probe);
     res.json(status);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -119,8 +100,8 @@ router.get('/platform/online-status', async (req, res) => {
 router.put('/platform/online-test-mode', async (req, res) => {
   try {
     const enabled = Boolean(req.body?.enabled);
-    setOnlineTestModeEnabled(enabled);
-    const status = await buildOnlineStatus(false);
+    setUserOnlineTestMode(enabled, req.authUser!.id);
+    const status = await buildOnlineStatus(req.authUser!.id, false);
     res.json(status);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -129,10 +110,15 @@ router.put('/platform/online-test-mode', async (req, res) => {
 
 router.post('/platform/sandbox-test', async (req, res) => {
   try {
-    const institutions = listInstitutions();
+    const user = req.authUser!;
+    const institutions = listInstitutions(user.id);
     const targetInstId = req.body?.institutionId || institutions[0]?.id;
     if (!targetInstId) {
       return res.status(400).json({ error: 'Configure ao menos uma instituição/prefeitura antes de criar o processo sandbox.' });
+    }
+    const access = canAccessInstitution(targetInstId, user);
+    if (!access.ok) {
+      return res.status(access.status).json({ error: access.error });
     }
 
     const secretarios = listSecretarios(targetInstId);
@@ -172,6 +158,7 @@ router.post('/platform/sandbox-test', async (req, res) => {
     );
 
     const created = createProcess({
+      owner_user_id: user.id,
       institution_id: targetInstId,
       secretario_id: secretarios[0]?.id || null,
       dotacao_id: dotacoes[0]?.id || null,
@@ -203,7 +190,8 @@ router.post('/platform/sandbox-test', async (req, res) => {
     if (autoRunAll) {
       const result = await executeAllAgentSteps({
         processId: created.process.id,
-        actorName: 'Operador Modo Teste Online',
+        userId: user.id,
+        actorName: user.name || 'Operador Modo Teste Online',
         actorRole: 'Homologador de Testes',
         autoApprove: Boolean(req.body?.autoApprove)
       });

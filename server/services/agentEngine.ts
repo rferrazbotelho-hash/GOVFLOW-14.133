@@ -20,6 +20,7 @@ import {
 
 export interface RunAgentOptions {
   processId: string;
+  userId?: string;
   agentNumber: number;
   feedback?: string;
   actorName?: string;
@@ -205,6 +206,7 @@ ${JSON.stringify(priorJsonContext, null, 2)}
 ${opts.feedback ? `### FEEDBACK / INSTRUÇÃO DE REVISÃO DO GESTOR:\n${opts.feedback}\n` : ''}`;
 
   const llmResult = await tryGenerateWithLlm({
+    userId: opts.userId || bundle.process.owner_user_id || undefined,
     agentNumber: opts.agentNumber,
     agentTitle: def.title,
     legalBasis: def.legalBasis,
@@ -262,6 +264,7 @@ ${opts.feedback ? `### FEEDBACK / INSTRUÇÃO DE REVISÃO DO GESTOR:\n${opts.fee
 
 export async function executeAllAgentSteps(opts: {
   processId: string;
+  userId?: string;
   actorName?: string;
   actorRole?: string;
   autoApprove?: boolean;
@@ -293,6 +296,7 @@ export async function executeAllAgentSteps(opts: {
 
     await executeAgentStep({
       processId: opts.processId,
+      userId: opts.userId || initial.process.owner_user_id || undefined,
       agentNumber: def.number,
       actorName,
       feedback: opts.feedback

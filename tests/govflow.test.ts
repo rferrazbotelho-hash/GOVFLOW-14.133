@@ -81,6 +81,34 @@ import { createApp } from '../server/index.js';
 const require = createRequire(import.meta.url);
 const XLSX = require('xlsx');
 
+async function createAuthedFetch(
+  baseUrl: string,
+  username = process.env.GOVFLOW_ADMIN_USERNAME || 'admin',
+  password = process.env.GOVFLOW_ADMIN_PASSWORD || 'GovFlow@14133'
+): Promise<{
+  token: string;
+  user: any;
+  authFetch: (pathOrUrl: string, init?: RequestInit) => Promise<Response>;
+}> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  if (!res.ok) {
+    throw new Error(`Falha ao autenticar usuário de teste "${username}" (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as any;
+  const token = String(data.token);
+  const authFetch = (pathOrUrl: string, init?: RequestInit) => {
+    const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${baseUrl}${pathOrUrl}`;
+    const headers = new Headers(init?.headers || {});
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(url, { ...init, headers });
+  };
+  return { token, user: data.user, authFetch };
+}
+
 describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Agentes e Exportação', () => {
   beforeAll(() => {
     if (fs.existsSync(tmpDbPath)) fs.unlinkSync(tmpDbPath);
@@ -459,16 +487,17 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     try {
       const address = server.address() as { port: number };
       const baseUrl = `http://127.0.0.1:${address.port}`;
+      const { authFetch: apiFetch } = await createAuthedFetch(baseUrl);
 
       const healthRes = await fetch(`${baseUrl}/api/health`);
       expect(healthRes.status).toBe(200);
       const health = (await healthRes.json()) as any;
       expect(health.ok).toBe(true);
 
-      const insts = (await (await fetch(`${baseUrl}/api/institutions`)).json()) as any[];
+      const insts = (await (await apiFetch('/api/institutions')).json()) as any[];
       expect(insts.length).toBeGreaterThan(0);
 
-      const createRes = await fetch(`${baseUrl}/api/processes`, {
+      const createRes = await apiFetch('/api/processes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -491,7 +520,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
 
       // Executa sequência 1..9 pulando o 8 (dispensado)
       for (const n of [1, 2, 3, 4, 5, 6, 7, 9]) {
-        const execRes = await fetch(`${baseUrl}/api/processes/${bundle.process.id}/agents/${n}/execute`, {
+        const execRes = await apiFetch(`/api/processes/${bundle.process.id}/agents/${n}/execute`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({})
@@ -504,7 +533,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         }
       }
 
-      const zipRes = await fetch(`${baseUrl}/api/processes/${bundle.process.id}/export/zip`);
+      const zipRes = await apiFetch(`/api/processes/${bundle.process.id}/export/zip`);
       expect(zipRes.status).toBe(200);
       const zipArrayBuf = await zipRes.arrayBuffer();
       const zip = await JSZip.loadAsync(zipArrayBuf);
@@ -629,7 +658,8 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     try {
       const address = server.address() as { port: number };
       const baseUrl = `http://127.0.0.1:${address.port}`;
-      const insts = (await (await fetch(`${baseUrl}/api/institutions`)).json()) as any[];
+      const { authFetch: apiFetch } = await createAuthedFetch(baseUrl);
+      const insts = (await (await apiFetch('/api/institutions')).json()) as any[];
 
       // Cria planilha real de pesquisa de preço
       const wb = XLSX.utils.book_new();
@@ -650,7 +680,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         'pesquisa_epis_2026.xlsx'
       );
 
-      const parseRes = await fetch(`${baseUrl}/api/price-research/parse`, {
+      const parseRes = await apiFetch('/api/price-research/parse', {
         method: 'POST',
         body: fd
       });
@@ -660,7 +690,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(parsed.valor_total_estimado).toBe(18750);
 
       // Cria processo em Pregão Presencial + SRP usando os itens extraídos
-      const createRes = await fetch(`${baseUrl}/api/processes`, {
+      const createRes = await apiFetch('/api/processes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -686,7 +716,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const created = (await createRes.json()) as any;
 
       // Elabora todas as peças 01 a 11 com os agentes
-      const batchRes = await fetch(`${baseUrl}/api/processes/${created.process.id}/agents/execute-all`, {
+      const batchRes = await apiFetch(`/api/processes/${created.process.id}/agents/execute-all`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actorName: 'Dra. Helena Campos' })
@@ -711,7 +741,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
 
       // Verifica exportação individual em Word (.docx) de múltiplas peças + Dossiê Consolidado + ZIP
       for (const num of [1, 5, 9]) {
-        const docxRes = await fetch(`${baseUrl}/api/processes/${created.process.id}/export/docx/${num}`);
+        const docxRes = await apiFetch(`/api/processes/${created.process.id}/export/docx/${num}`);
         expect(docxRes.status).toBe(200);
         const ab = await docxRes.arrayBuffer();
         const bytes = new Uint8Array(ab);
@@ -724,7 +754,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         expect(docXml).toContain('Pregão Presencial');
       }
 
-      const zipRes = await fetch(`${baseUrl}/api/processes/${created.process.id}/export/zip`);
+      const zipRes = await apiFetch(`/api/processes/${created.process.id}/export/zip`);
       expect(zipRes.status).toBe(200);
       const zip = await JSZip.loadAsync(await zipRes.arrayBuffer());
       const names = Object.keys(zip.files);
@@ -765,10 +795,11 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const s = app.listen(0, '127.0.0.1', () => resolve(s));
     });
 
-    try {
-      const address = server.address() as { port: number };
-      const baseUrl = `http://127.0.0.1:${address.port}`;
+    const address = server.address() as { port: number };
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const { authFetch: apiFetch, user: adminUser } = await createAuthedFetch(baseUrl);
 
+    try {
       delete process.env.AI_PROVIDER;
       delete process.env.GEMINI_API_KEY;
       delete process.env.GOOGLE_API_KEY;
@@ -776,9 +807,12 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       process.env.APPDATA = emptyConfigRoot;
       process.env.XDG_CONFIG_HOME = emptyConfigRoot;
       getDb().prepare("DELETE FROM app_settings WHERE key IN ('ai_provider', 'gemini_api_key')").run();
+      getDb()
+        .prepare("DELETE FROM user_settings WHERE user_id = ? AND key IN ('ai_provider', 'gemini_api_key')")
+        .run(adminUser.id);
 
       // 1. Sem credenciais: modo padrão 'auto' entra em fallback seguro local
-      const defaultRes = await fetch(`${baseUrl}/api/settings/ai`);
+      const defaultRes = await apiFetch('/api/settings/ai');
       expect(defaultRes.status).toBe(200);
       const defaultJson = (await defaultRes.json()) as any;
       expect(defaultJson.provider).toBe('auto');
@@ -787,7 +821,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(defaultJson.hasGeminiKey).toBe(false);
 
       // Endpoint POST /api/settings/ai/test sem token
-      const testLocalRes = await fetch(`${baseUrl}/api/settings/ai/test`, { method: 'POST' });
+      const testLocalRes = await apiFetch('/api/settings/ai/test', { method: 'POST' });
       expect(testLocalRes.status).toBe(200);
       const testLocalJson = (await testLocalRes.json()) as any;
       expect(testLocalJson.ok).toBe(true);
@@ -797,7 +831,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
 
       // 2. Detecção automática via GOOGLE_API_KEY sem PUT na UI
       process.env.GOOGLE_API_KEY = 'auto-google-key-sample';
-      const googleEnvRes = (await (await fetch(`${baseUrl}/api/settings/ai`)).json()) as any;
+      const googleEnvRes = (await (await apiFetch('/api/settings/ai')).json()) as any;
       expect(googleEnvRes.provider).toBe('auto');
       expect(googleEnvRes.effectiveProvider).toBe('gemini');
       expect(googleEnvRes.authSource).toBe('env_google_key');
@@ -805,7 +839,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
 
       // 3. Prioridade GEMINI_API_KEY sobre GOOGLE_API_KEY
       process.env.GEMINI_API_KEY = 'auto-gemini-key-sample';
-      const geminiEnvRes = (await (await fetch(`${baseUrl}/api/settings/ai`)).json()) as any;
+      const geminiEnvRes = (await (await apiFetch('/api/settings/ai')).json()) as any;
       expect(geminiEnvRes.effectiveProvider).toBe('gemini');
       expect(geminiEnvRes.authSource).toBe('env_gemini_key');
 
@@ -825,7 +859,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       );
       process.env.GOOGLE_APPLICATION_CREDENTIALS = authUserPath;
 
-      const adcUserRes = (await (await fetch(`${baseUrl}/api/settings/ai`)).json()) as any;
+      const adcUserRes = (await (await apiFetch('/api/settings/ai')).json()) as any;
       expect(adcUserRes.effectiveProvider).toBe('gemini');
       expect(adcUserRes.authSource).toBe('adc_authorized_user');
       expect(adcUserRes.hasGeminiKey).toBe(true);
@@ -863,7 +897,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       clearGeminiAuthCache();
       process.env.GOOGLE_APPLICATION_CREDENTIALS = saPath;
 
-      const adcSaRes = (await (await fetch(`${baseUrl}/api/settings/ai`)).json()) as any;
+      const adcSaRes = (await (await apiFetch('/api/settings/ai')).json()) as any;
       expect(adcSaRes.effectiveProvider).toBe('gemini');
       expect(adcSaRes.authSource).toBe('adc_service_account');
 
@@ -887,6 +921,9 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     } finally {
       restoreEnv();
       getDb().prepare("DELETE FROM app_settings WHERE key IN ('ai_provider', 'gemini_api_key')").run();
+      getDb()
+        .prepare("DELETE FROM user_settings WHERE user_id = ? AND key IN ('ai_provider', 'gemini_api_key')")
+        .run(adminUser.id);
       fs.rmSync(tmpDir, { recursive: true, force: true });
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -901,16 +938,17 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     try {
       const address = server.address() as { port: number };
       const baseUrl = `http://127.0.0.1:${address.port}`;
-      const insts = (await (await fetch(`${baseUrl}/api/institutions`)).json()) as any[];
+      const { authFetch: apiFetch } = await createAuthedFetch(baseUrl);
+      const insts = (await (await apiFetch('/api/institutions')).json()) as any[];
       const instDetail = (await (
-        await fetch(`${baseUrl}/api/institutions/${insts[0].id}`)
+        await apiFetch(`/api/institutions/${insts[0].id}`)
       ).json()) as any;
       const dots = instDetail.dotacoes as any[];
       expect(dots.length).toBeGreaterThanOrEqual(2);
 
       // 1. Cria processo classificado explicitamente como SERVICOS com múltiplas dotações (2 cadastradas + 1 manual)
       const manualEntry = '02.09.01 - Fundo Municipal de Transporte | 3.3.90.39.19 | Fonte 1.500.000 [Red. 905]';
-      const createRes = await fetch(`${baseUrl}/api/processes`, {
+      const createRes = await apiFetch('/api/processes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -945,8 +983,8 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       ).toBe(false);
 
       // 2. Elabora agentes 01–05: como Tipo = SERVICOS, deve enquadrar como CATSER/Serviços (e não aquisição de veículo)
-      const batchRes = await fetch(
-        `${baseUrl}/api/processes/${created.process.id}/agents/execute-all`,
+      const batchRes = await apiFetch(
+        `/api/processes/${created.process.id}/agents/execute-all`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -968,7 +1006,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(p5.html_content).toContain(manualEntry);
 
       // 3. Atualiza para OBRAS_ENGENHARIA apenas com dotação manual e verifica enquadramento técnico + exportação DOCX
-      const updRes = await fetch(`${baseUrl}/api/processes/${created.process.id}`, {
+      const updRes = await apiFetch(`/api/processes/${created.process.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -982,7 +1020,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(updatedBundle.process.tipo_contratacao).toBe('OBRAS_ENGENHARIA');
       expect(updatedBundle.validation_alerts.some((a: any) => a.id === 'missing-dotacao')).toBe(false);
 
-      const ag5Res = await fetch(`${baseUrl}/api/processes/${created.process.id}/agents/5/execute`, {
+      const ag5Res = await apiFetch(`/api/processes/${created.process.id}/agents/5/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
@@ -993,7 +1031,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(ag5Data.piece.html_content).toContain('CREA/CAU');
       expect(ag5Data.piece.html_content).toContain('02.07.01 - Sec. Obras | 4.4.90.51.00 | Fonte 1.700 [Red. 777]');
 
-      const ag6Res = await fetch(`${baseUrl}/api/processes/${created.process.id}/agents/6/execute`, {
+      const ag6Res = await apiFetch(`/api/processes/${created.process.id}/agents/6/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
@@ -1002,7 +1040,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const ag6Data = (await ag6Res.json()) as any;
       expect(ag6Data.piece.html_content).toContain('10/12/2026 às 09h30');
 
-      const ag9Res = await fetch(`${baseUrl}/api/processes/${created.process.id}/agents/9/execute`, {
+      const ag9Res = await apiFetch(`/api/processes/${created.process.id}/agents/9/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
@@ -1011,7 +1049,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const ag9Data = (await ag9Res.json()) as any;
       expect(ag9Data.piece.html_content).toContain('10/12/2026 às 09h30');
 
-      const docxRes = await fetch(`${baseUrl}/api/processes/${created.process.id}/export/docx`);
+      const docxRes = await apiFetch(`/api/processes/${created.process.id}/export/docx`);
       expect(docxRes.status).toBe(200);
       const docxZip = await JSZip.loadAsync(await docxRes.arrayBuffer());
       const docXml = await docxZip.file('word/document.xml')!.async('string');
@@ -1032,9 +1070,10 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     try {
       const port = (server.address() as any).port;
       const baseUrl = `http://127.0.0.1:${port}`;
+      const { authFetch: apiFetch } = await createAuthedFetch(baseUrl);
 
       // 1. Verifica status Modo Teste Online e alternância persistida
-      const statusRes = await fetch(`${baseUrl}/api/platform/online-status`);
+      const statusRes = await apiFetch('/api/platform/online-status');
       expect(statusRes.status).toBe(200);
       const onlineStatus = (await statusRes.json()) as any;
       expect(onlineStatus.online).toBe(true);
@@ -1042,14 +1081,14 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(onlineStatus.database_ok).toBe(true);
 
       // 2. Consulta base curada de jurisprudência TCU
-      const tcuSearchRes = await fetch(`${baseUrl}/api/tcu/acordaos?q=marca`);
+      const tcuSearchRes = await apiFetch('/api/tcu/acordaos?q=marca');
       expect(tcuSearchRes.status).toBe(200);
       const tcuSearch = (await tcuSearchRes.json()) as any;
       expect(tcuSearch.items.length).toBeGreaterThan(0);
       expect(tcuSearch.items.some((it: any) => it.numero.includes('1.264/2019'))).toBe(true);
 
       // 3. Executa Sandbox 01-11 via rota oficial de Modo Teste Online
-      const sandboxRes = await fetch(`${baseUrl}/api/platform/sandbox-test`, {
+      const sandboxRes = await apiFetch('/api/platform/sandbox-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ autoRunAll: true })
@@ -1102,7 +1141,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         aplicacao_pratica: 'Aplicação direta em pareceres referenciais.',
         fonte: 'BASE_CURADA_TCU'
       };
-      const pinRes = await fetch(`${baseUrl}/api/processes/${bundle.process.id}`, {
+      const pinRes = await apiFetch(`/api/processes/${bundle.process.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1113,7 +1152,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const afterPin = (await pinRes.json()) as any;
       expect(afterPin.pieces.find((p: any) => p.agent_number === 10).status).toBe('DESATUALIZADO');
 
-      const regen10Res = await fetch(`${baseUrl}/api/processes/${bundle.process.id}/agents/10/execute`, {
+      const regen10Res = await apiFetch(`/api/processes/${bundle.process.id}/agents/10/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actorName: 'Procurador Teste' })
@@ -1123,7 +1162,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(regen10.piece.html_content).toContain('Acórdão nº 2.999/2025-TCU-Plenário');
 
       // 4. Tipografia Canônica (Arial + pt-BR) e Preservação UTF-8 em DOCX e PDF
-      const docx10Res = await fetch(`${baseUrl}/api/processes/${bundle.process.id}/export/docx/10`);
+      const docx10Res = await apiFetch(`/api/processes/${bundle.process.id}/export/docx/10`);
       expect(docx10Res.status).toBe(200);
       const docx10Zip = await JSZip.loadAsync(await docx10Res.arrayBuffer());
       const doc10Xml = await docx10Zip.file('word/document.xml')!.async('string');
@@ -1138,7 +1177,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(doc10Xml).not.toContain('\uFFFD');
       expect(doc10Xml).not.toContain('Ã§');
 
-      const pdfRes = await fetch(`${baseUrl}/api/processes/${bundle.process.id}/export/pdf`);
+      const pdfRes = await apiFetch(`/api/processes/${bundle.process.id}/export/pdf`);
       expect(pdfRes.status).toBe(200);
       const pdfBuf = Buffer.from(await pdfRes.arrayBuffer());
       expect(pdfBuf.subarray(0, 5).toString('ascii')).toBe('%PDF-');
@@ -1333,10 +1372,11 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const s = app.listen(0, '127.0.0.1', () => resolve(s));
     });
 
-    try {
-      const address = server.address() as { port: number };
-      const baseUrl = `http://127.0.0.1:${address.port}`;
+    const address = server.address() as { port: number };
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const { authFetch: apiFetch, user: adminUser } = await createAuthedFetch(baseUrl);
 
+    try {
       delete process.env.AI_PROVIDER;
       delete process.env.GEMINI_API_KEY;
       delete process.env.GOOGLE_API_KEY;
@@ -1344,6 +1384,9 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       process.env.APPDATA = emptyCfg;
       process.env.XDG_CONFIG_HOME = emptyCfg;
       getDb().prepare("DELETE FROM app_settings WHERE key IN ('ai_provider', 'gemini_api_key')").run();
+      getDb()
+        .prepare("DELETE FROM user_settings WHERE user_id = ? AND key IN ('ai_provider', 'gemini_api_key')")
+        .run(adminUser.id);
       clearGeminiAuthCache();
 
       // Sanitização e validação de chaves mascaradas/entre aspas
@@ -1352,7 +1395,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(validateManualGeminiApiKey('••••••••••••••••••••••').ok).toBe(false);
 
       // PUT com caracteres mascarados deve falhar com HTTP 400 sem sujar o banco
-      const badPut = await fetch(`${baseUrl}/api/settings/ai`, {
+      const badPut = await apiFetch('/api/settings/ai', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider: 'gemini', geminiApiKey: '••••••••••••••••••••••' })
@@ -1404,7 +1447,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       ).rejects.toThrow(/invalid_grant.*expired or revoked/i);
 
       // Simula chave antiga salva no SQLite e executa POST /api/settings/ai/gemini/reset
-      const putValidShape = await fetch(`${baseUrl}/api/settings/ai`, {
+      const putValidShape = await apiFetch('/api/settings/ai', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider: 'gemini', geminiApiKey: 'AIzaSyDummyValidKeyForUnitTest123' })
@@ -1413,7 +1456,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const beforeReset = (await putValidShape.json()) as any;
       expect(beforeReset.authSource).toBe('db_api_key');
 
-      const resetRes = await fetch(`${baseUrl}/api/settings/ai/gemini/reset`, {
+      const resetRes = await apiFetch('/api/settings/ai/gemini/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ setAutoProvider: true })
@@ -1435,7 +1478,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(g4Cfg.thinkingConfig?.thinkingLevel).toBe('MEDIUM');
       expect(g4Cfg.temperature).toBeUndefined();
 
-      const putModelRes = await fetch(`${baseUrl}/api/settings/ai`, {
+      const putModelRes = await apiFetch('/api/settings/ai', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1452,6 +1495,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       let capturedBody: any = null;
       const llmOut = await tryGenerateWithLlm(
         {
+          userId: adminUser.id,
           agentNumber: 1,
           agentTitle: 'Teste Gemini 4 Hydrogen',
           legalBasis: 'Art. 18',
@@ -1497,6 +1541,9 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       }
       clearGeminiAuthCache();
       getDb().prepare("DELETE FROM app_settings WHERE key IN ('ai_provider', 'gemini_api_key', 'gemini_model')").run();
+      getDb()
+        .prepare("DELETE FROM user_settings WHERE user_id = ? AND key IN ('ai_provider', 'gemini_api_key', 'gemini_model')")
+        .run(adminUser.id);
       fs.rmSync(emptyCfg, { recursive: true, force: true });
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -1511,13 +1558,14 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
     try {
       const address = server.address() as { port: number };
       const baseUrl = `http://127.0.0.1:${address.port}`;
+      const { authFetch: apiFetch } = await createAuthedFetch(baseUrl);
 
       // 1. Validação CNPJ inválido retorna 400
-      const badCnpj = await fetch(`${baseUrl}/api/cnpj/11111111111111`);
+      const badCnpj = await apiFetch('/api/cnpj/11111111111111');
       expect(badCnpj.status).toBe(400);
 
       // 2. Criar e atualizar Instituição (POST/PUT/GET + 404)
-      const createInstRes = await fetch(`${baseUrl}/api/institutions`, {
+      const createInstRes = await apiFetch('/api/institutions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1533,7 +1581,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const newInst = (await createInstRes.json()) as any;
       expect(newInst.cnpj).toBe('11.222.333/0001-81');
 
-      const updateInstRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}`, {
+      const updateInstRes = await apiFetch(`/api/institutions/${newInst.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ portal_transparencia_url: 'https://transparencia.teste.mg.gov.br' })
@@ -1542,10 +1590,10 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const updatedInst = (await updateInstRes.json()) as any;
       expect(updatedInst.portal_transparencia_url).toBe('https://transparencia.teste.mg.gov.br');
 
-      expect((await fetch(`${baseUrl}/api/institutions/inexistente-999`)).status).toBe(404);
+      expect((await apiFetch('/api/institutions/inexistente-999')).status).toBe(404);
 
       // 3. Upload de Logo (rejeita javascript: URL e aceita multipart PNG válido)
-      const badLogoRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/logo`, {
+      const badLogoRes = await apiFetch(`/api/institutions/${newInst.id}/logo`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ logo_data_url: 'javascript:alert(1)' })
@@ -1560,7 +1608,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         new Blob([Buffer.from(tinyPngBase64, 'base64')], { type: 'image/png' }),
         'brasao.png'
       );
-      const logoRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/logo`, {
+      const logoRes = await apiFetch(`/api/institutions/${newInst.id}/logo`, {
         method: 'POST',
         body: logoFd
       });
@@ -1571,7 +1619,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       // 4. CRUD Secretários & Dotações + validações 400/404
       expect(
         (
-          await fetch(`${baseUrl}/api/institutions/${newInst.id}/secretarios`, {
+          await apiFetch(`/api/institutions/${newInst.id}/secretarios`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ secretaria: '', nome: '' })
@@ -1579,7 +1627,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         ).status
       ).toBe(400);
 
-      const secRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/secretarios`, {
+      const secRes = await apiFetch(`/api/institutions/${newInst.id}/secretarios`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1592,7 +1640,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(secRes.status).toBe(201);
       const sec = (await secRes.json()) as any;
 
-      const secPutRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/secretarios/${sec.id}`, {
+      const secPutRes = await apiFetch(`/api/institutions/${newInst.id}/secretarios/${sec.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ portaria_nomeacao: 'Portaria nº 099/2026' })
@@ -1600,7 +1648,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(secPutRes.status).toBe(200);
       expect(((await secPutRes.json()) as any).portaria_nomeacao).toBe('Portaria nº 099/2026');
 
-      const dotRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/dotacoes`, {
+      const dotRes = await apiFetch(`/api/institutions/${newInst.id}/dotacoes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1616,7 +1664,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const dot = (await dotRes.json()) as any;
       expect(dot.saldo_disponivel).toBe(950000);
 
-      const dotPutRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/dotacoes/${dot.id}`, {
+      const dotPutRes = await apiFetch(`/api/institutions/${newInst.id}/dotacoes/${dot.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ saldo_disponivel: 1200000 })
@@ -1625,7 +1673,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(((await dotPutRes.json()) as any).saldo_disponivel).toBe(1200000);
 
       // 5. Importação CSV & JSON via HTTP
-      const impRes = await fetch(`${baseUrl}/api/institutions/${newInst.id}/import`, {
+      const impRes = await apiFetch(`/api/institutions/${newInst.id}/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1638,21 +1686,21 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const impJson = (await impRes.json()) as any;
       expect(impJson.imported).toBe(1);
 
-      const delSec = await fetch(
-        `${baseUrl}/api/institutions/${newInst.id}/secretarios/${impJson.items[0].id}`,
+      const delSec = await apiFetch(
+        `/api/institutions/${newInst.id}/secretarios/${impJson.items[0].id}`,
         { method: 'DELETE' }
       );
       expect(delSec.status).toBe(200);
       expect(
         (
-          await fetch(`${baseUrl}/api/institutions/${newInst.id}/dotacoes/nao-existe`, {
+          await apiFetch(`/api/institutions/${newInst.id}/dotacoes/nao-existe`, {
             method: 'DELETE'
           })
         ).status
       ).toBe(404);
 
       // 6. Toggle Modo Teste Online via HTTP
-      const toggleOff = await fetch(`${baseUrl}/api/platform/online-test-mode`, {
+      const toggleOff = await apiFetch('/api/platform/online-test-mode', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: false })
@@ -1660,7 +1708,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(toggleOff.status).toBe(200);
       expect(((await toggleOff.json()) as any).test_mode).toBe(false);
 
-      const toggleOn = await fetch(`${baseUrl}/api/platform/online-test-mode`, {
+      const toggleOn = await apiFetch('/api/platform/online-test-mode', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: true })
@@ -1669,7 +1717,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(((await toggleOn.json()) as any).test_mode).toBe(true);
 
       // 7. Processo Concorrência Eletrônica (Obras) + Toggle SRP + Guarda Sequencial + Feedback + Edit/Restore + Exports + Delete Cascata
-      const procRes = await fetch(`${baseUrl}/api/processes`, {
+      const procRes = await apiFetch('/api/processes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1695,7 +1743,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(procBundle.pieces.find((p: any) => p.agent_number === 8).status).not.toBe('DISPENSADO');
 
       // Guarda sequencial: tentar executar Agente 5 antes do Agente 1 deve retornar HTTP 400
-      const outOfOrderRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/5/execute`, {
+      const outOfOrderRes = await apiFetch(`/api/processes/${procId}/agents/5/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
@@ -1703,7 +1751,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(outOfOrderRes.status).toBe(400);
 
       // Alternar SRP true -> false deve dispensar Agente 08
-      const srpOffRes = await fetch(`${baseUrl}/api/processes/${procId}`, {
+      const srpOffRes = await apiFetch(`/api/processes/${procId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ usar_srp: false })
@@ -1713,7 +1761,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(srpOffBundle.pieces.find((p: any) => p.agent_number === 8).status).toBe('DISPENSADO');
 
       // Execução em lote 01–11 (10 peças ativas, pulando 08)
-      const batchRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/execute-all`, {
+      const batchRes = await apiFetch(`/api/processes/${procId}/agents/execute-all`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actorName: 'Eng. Roberto Lima', autoApprove: false })
@@ -1727,7 +1775,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
 
       // Regenerar Agente 2 com Feedback via HTTP
       const fbText = 'Incluir cláusula expressa de vistoria técnica facultativa no canteiro de obras.';
-      const fbRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/2/execute`, {
+      const fbRes = await apiFetch(`/api/processes/${procId}/agents/2/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ feedback: fbText })
@@ -1739,7 +1787,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(fbJson.piece.structured_json.feedback_incorporado).toBe(fbText);
 
       // Edição Manual -> Versões -> Restore v1 -> Aprovar e Assinar (SHA-256)
-      const editRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/2`, {
+      const editRes = await apiFetch(`/api/processes/${procId}/agents/2`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1751,12 +1799,12 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       const editJson = (await editRes.json()) as any;
       expect(editJson.piece.current_version).toBe(3);
 
-      const versionsRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/2/versions`);
+      const versionsRes = await apiFetch(`/api/processes/${procId}/agents/2/versions`);
       expect(versionsRes.status).toBe(200);
       const versionsList = (await versionsRes.json()) as any[];
       expect(versionsList.length).toBeGreaterThanOrEqual(3);
 
-      const restoreRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/2/restore`, {
+      const restoreRes = await apiFetch(`/api/processes/${procId}/agents/2/restore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ versionNumber: 1, actorName: 'Dra. Carla Revisor' })
@@ -1766,7 +1814,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(restoreJson.piece.current_version).toBe(4);
       expect(restoreJson.piece.html_content).not.toContain('Parágrafo incluído manualmente');
 
-      const approveRes = await fetch(`${baseUrl}/api/processes/${procId}/agents/2/approve`, {
+      const approveRes = await apiFetch(`/api/processes/${procId}/agents/2/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actorName: 'Eng. Roberto Lima', actorRole: 'Secretário de Obras' })
@@ -1777,20 +1825,20 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(approveJson.piece.content_hash).toMatch(/^[a-f0-9]{64}$/);
 
       // Exports HTTP (PDF, DOCX consolidado, DOCX avulso Ag. 09 e ZIP sem Ag. 08)
-      const pdfRes = await fetch(`${baseUrl}/api/processes/${procId}/export/pdf`);
+      const pdfRes = await apiFetch(`/api/processes/${procId}/export/pdf`);
       expect(pdfRes.status).toBe(200);
       expect(pdfRes.headers.get('content-type')).toContain('application/pdf');
       const pdfBytes = await pdfRes.arrayBuffer();
       expect(pdfBytes.byteLength).toBeGreaterThan(2000);
 
-      const docxRes = await fetch(`${baseUrl}/api/processes/${procId}/export/docx`);
+      const docxRes = await apiFetch(`/api/processes/${procId}/export/docx`);
       expect(docxRes.status).toBe(200);
       expect(docxRes.headers.get('content-type')).toContain('wordprocessingml');
 
-      const singleDocxRes = await fetch(`${baseUrl}/api/processes/${procId}/export/docx/9`);
+      const singleDocxRes = await apiFetch(`/api/processes/${procId}/export/docx/9`);
       expect(singleDocxRes.status).toBe(200);
 
-      const zipRes = await fetch(`${baseUrl}/api/processes/${procId}/export/zip`);
+      const zipRes = await apiFetch(`/api/processes/${procId}/export/zip`);
       expect(zipRes.status).toBe(200);
       const zipLoaded = await JSZip.loadAsync(await zipRes.arrayBuffer());
       const zipEntries = Object.keys(zipLoaded.files);
@@ -1799,9 +1847,9 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(zipEntries.some((f) => f.startsWith('08_'))).toBe(false);
 
       // Delete em cascata
-      const delProcRes = await fetch(`${baseUrl}/api/processes/${procId}`, { method: 'DELETE' });
+      const delProcRes = await apiFetch(`/api/processes/${procId}`, { method: 'DELETE' });
       expect(delProcRes.status).toBe(200);
-      expect((await fetch(`${baseUrl}/api/processes/${procId}`)).status).toBe(404);
+      expect((await apiFetch(`/api/processes/${procId}`)).status).toBe(404);
       const remainingPieces = getDb()
         .prepare('SELECT COUNT(*) as c FROM agent_pieces WHERE process_id = ?')
         .get(procId) as { c: number };
@@ -1897,6 +1945,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       try {
         const address = server.address() as { port: number };
         const baseUrl = `http://127.0.0.1:${address.port}`;
+        const { authFetch: apiFetch } = await createAuthedFetch(baseUrl);
 
         // 1. /api/health com diagnóstico vivo do SQLite
         const healthRes = await fetch(`${baseUrl}/api/health`);
@@ -1909,7 +1958,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         expect(healthJson.memory_mb).toBeGreaterThan(0);
 
         // 2. JSON malformado devolve JSON estruturado 400 em vez de HTML
-        const malformedRes = await fetch(`${baseUrl}/api/processes`, {
+        const malformedRes = await apiFetch('/api/processes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: '{json_invalido'
@@ -1920,11 +1969,11 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         expect(malformedJson.error).toBeTruthy();
 
         // 3. DELETE e Clone em IDs inexistentes retornam 404
-        const missingDelRes = await fetch(`${baseUrl}/api/processes/id-inexistente-999`, {
+        const missingDelRes = await apiFetch('/api/processes/id-inexistente-999', {
           method: 'DELETE'
         });
         expect(missingDelRes.status).toBe(404);
-        const missingCloneRes = await fetch(`${baseUrl}/api/processes/id-inexistente-999/clone`, {
+        const missingCloneRes = await apiFetch('/api/processes/id-inexistente-999/clone', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({})
@@ -1932,9 +1981,9 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         expect(missingCloneRes.status).toBe(404);
 
         // 4. Criar processo completo, executar Agente 01 e clonar processo
-        const insts = (await (await fetch(`${baseUrl}/api/institutions`)).json()) as any[];
+        const insts = (await (await apiFetch('/api/institutions')).json()) as any[];
         const instDetail = (await (
-          await fetch(`${baseUrl}/api/institutions/${insts[0].id}`)
+          await apiFetch(`/api/institutions/${insts[0].id}`)
         ).json()) as any;
 
         const samplePrecedent = {
@@ -1950,7 +1999,7 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
           fonte: 'BASE_CURADA_TCU' as const
         };
 
-        const createRes = await fetch(`${baseUrl}/api/processes`, {
+        const createRes = await apiFetch('/api/processes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1988,14 +2037,14 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         const srcBundle = (await createRes.json()) as any;
         const srcId = srcBundle.process.id as string;
 
-        const exec1Res = await fetch(`${baseUrl}/api/processes/${srcId}/agents/1/execute`, {
+        const exec1Res = await apiFetch(`/api/processes/${srcId}/agents/1/execute`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ actorName: 'Gestor Teste Ops' })
         });
         expect(exec1Res.status).toBe(200);
 
-        const cloneRes = await fetch(`${baseUrl}/api/processes/${srcId}/clone`, {
+        const cloneRes = await apiFetch(`/api/processes/${srcId}/clone`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({})
@@ -2021,8 +2070,8 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
 
         // 5. Duas exportações PDF concorrentes enfileiradas e concluídas com PDFs válidos
         const [pdfResA, pdfResB] = await Promise.all([
-          fetch(`${baseUrl}/api/processes/${srcId}/export/pdf`),
-          fetch(`${baseUrl}/api/processes/${srcId}/export/pdf`)
+          apiFetch(`/api/processes/${srcId}/export/pdf`),
+          apiFetch(`/api/processes/${srcId}/export/pdf`)
         ]);
         expect(pdfResA.status).toBe(200);
         expect(pdfResB.status).toBe(200);
@@ -2032,13 +2081,13 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         expect(bufB.subarray(0, 5).toString('utf8')).toBe('%PDF-');
 
         // Limpeza e verificação de DELETE duplicado -> 404
-        const delCloneRes = await fetch(`${baseUrl}/api/processes/${clonedBundle.process.id}`, {
+        const delCloneRes = await apiFetch(`/api/processes/${clonedBundle.process.id}`, {
           method: 'DELETE'
         });
         expect(delCloneRes.status).toBe(200);
-        const delSrcRes = await fetch(`${baseUrl}/api/processes/${srcId}`, { method: 'DELETE' });
+        const delSrcRes = await apiFetch(`/api/processes/${srcId}`, { method: 'DELETE' });
         expect(delSrcRes.status).toBe(200);
-        const delSrcTwiceRes = await fetch(`${baseUrl}/api/processes/${srcId}`, { method: 'DELETE' });
+        const delSrcTwiceRes = await apiFetch(`/api/processes/${srcId}`, { method: 'DELETE' });
         expect(delSrcTwiceRes.status).toBe(404);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -2093,6 +2142,201 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       else process.env.VERCEL = prevVercel;
       if (prevDataDir === undefined) delete process.env.GOVFLOW_DATA_DIR;
       else process.env.GOVFLOW_DATA_DIR = prevDataDir;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('autenticação, painel administrativo, ativação/atualização de usuários, isolamento individual e chamados de suporte (E-mail e Chat)', async () => {
+    const app = createApp();
+    const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+
+    try {
+      const address = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+
+      // 1. Endpoints protegidos exigem autenticação (401) e /api/app-info é público
+      expect((await fetch(`${baseUrl}/api/processes`)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/institutions`)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/settings/ai`)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/admin/overview`)).status).toBe(401);
+
+      const appInfoRes = await fetch(`${baseUrl}/api/app-info`);
+      expect(appInfoRes.status).toBe(200);
+      const appInfo = (await appInfoRes.json()) as any;
+      expect(appInfo.developer).toBe('Rodrigo Ferraz Botelho');
+      expect(appInfo.support_email).toBe('rodrigofb@live.com');
+      expect(appInfo.support_whatsapp).toBe('+5537999654266');
+      expect(appInfo.version).toBe('1.0.0');
+
+      // 2. Cadastro de novo usuário começa PENDENTE (is_active = false) e não loga antes de ativação
+      const regRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'maria.licitacoes',
+          name: 'Maria Oliveira',
+          email: 'maria@municipio.gov.br',
+          department: 'Compras Públicas',
+          password: 'SenhaForte123'
+        })
+      });
+      expect(regRes.status).toBe(201);
+      const regJson = (await regRes.json()) as any;
+      expect(regJson.user.is_active).toBe(false);
+      expect(regJson.user.role).toBe('USER');
+
+      const blockedLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'maria.licitacoes', password: 'SenhaForte123' })
+      });
+      expect(blockedLoginRes.status).toBe(403);
+
+      // 3. Login Administrativo verifica painel global e ativa + atualiza novo usuário
+      const { authFetch: adminFetch } = await createAuthedFetch(baseUrl);
+      const overview1 = (await (await adminFetch('/api/admin/overview')).json()) as any;
+      expect(overview1.stats.pending_users).toBeGreaterThanOrEqual(1);
+      expect(overview1.users.some((u: any) => u.username === 'maria.licitacoes' && !u.is_active)).toBe(true);
+
+      const activateRes = await adminFetch(`/api/admin/users/${regJson.user.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          is_active: true,
+          department: 'Secretaria de Licitações Ativada'
+        })
+      });
+      expect(activateRes.status).toBe(200);
+      const activatedUser = (await activateRes.json()) as any;
+      expect(activatedUser.is_active).toBe(true);
+      expect(activatedUser.department).toBe('Secretaria de Licitações Ativada');
+
+      // 4. Usuário A (maria.licitacoes) loga -> área individual e configurações isoladas
+      const { authFetch: userAFetch, user: userA } = await createAuthedFetch(
+        baseUrl,
+        'maria.licitacoes',
+        'SenhaForte123'
+      );
+      expect(userA.is_active).toBe(true);
+      expect((await userAFetch('/api/admin/overview')).status).toBe(403);
+
+      // Configura IA individual para Usuário A
+      const aiPutA = await userAFetch('/api/settings/ai', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'local', geminiModel: 'gemini-2.5-flash' })
+      });
+      expect(aiPutA.status).toBe(200);
+      expect(((await aiPutA.json()) as any).provider).toBe('local');
+
+      const instARes = await userAFetch('/api/institutions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cnpj: '11222333000181',
+          razao_social: 'PREFEITURA EXCLUSIVA DA MARIA',
+          nome_fantasia: 'Prefeitura Privada Maria'
+        })
+      });
+      expect(instARes.status).toBe(201);
+      const instA = (await instARes.json()) as any;
+
+      const procARes = await userAFetch('/api/processes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          institution_id: instA.id,
+          numero_processo_licitatorio: 'PRIV-A/2026',
+          numero_processo_administrativo: 'PA-MARIA-01',
+          titulo_resumido: 'Processo Privado de Maria',
+          modalidade: 'PREGAO_ELETRONICO',
+          modo_disputa: 'ABERTO',
+          criterio_julgamento: 'MENOR_PRECO',
+          valor_estimado_global: 55000
+        })
+      });
+      expect(procARes.status).toBe(201);
+      const procA = (await procARes.json()) as any;
+
+      // 5. Admin cria Usuário B -> Usuário B NÃO vê dados nem configurações de A
+      const createBRes = await adminFetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'carlos.obras',
+          name: 'Carlos Pereira',
+          email: 'carlos@municipio.gov.br',
+          role: 'USER',
+          is_active: true,
+          password: 'CarlosSenha123'
+        })
+      });
+      expect(createBRes.status).toBe(201);
+      const userBCreated = (await createBRes.json()) as any;
+
+      const { authFetch: userBFetch } = await createAuthedFetch(baseUrl, 'carlos.obras', 'CarlosSenha123');
+      const procsB = (await (await userBFetch('/api/processes')).json()) as any[];
+      expect(procsB.some((p: any) => p.id === procA.process.id)).toBe(false);
+      expect((await userBFetch(`/api/processes/${procA.process.id}`)).status).toBe(403);
+      expect((await userBFetch(`/api/institutions/${instA.id}`)).status).toBe(403);
+
+      const aiB = (await (await userBFetch('/api/settings/ai')).json()) as any;
+      expect(aiB.provider).toBe('auto');
+      expect(aiB.geminiModel).toBe('gemini-4-hydrogen');
+
+      // 6. Chamados de Suporte via E-mail e Chat + Resposta do Administrador
+      const emailTicketRes = await userAFetch('/api/support/tickets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'EMAIL',
+          subject: 'Dúvida sobre Edital Art. 25',
+          message: 'Gostaria de auxílio sobre cláusula de habilitação.'
+        })
+      });
+      expect(emailTicketRes.status).toBe(201);
+
+      const chatTicketRes = await userAFetch('/api/support/tickets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'CHAT',
+          subject: 'Atendimento via Chat',
+          message: 'Preciso ajustar meu certificado de acesso.'
+        })
+      });
+      expect(chatTicketRes.status).toBe(201);
+      const chatTicket = ((await chatTicketRes.json()) as any).ticket;
+
+      // Admin vê ambos os usuários, todos os processos e responde ao chamado
+      const overview2 = (await (await adminFetch('/api/admin/overview')).json()) as any;
+      expect(overview2.processes.some((p: any) => p.id === procA.process.id)).toBe(true);
+      expect(overview2.tickets.some((t: any) => t.id === chatTicket.id)).toBe(true);
+
+      const replyRes = await adminFetch(`/api/support/tickets/${chatTicket.id}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: 'Olá Maria, atendimento concluído pelo suporte técnico.',
+          status: 'RESOLVIDO'
+        })
+      });
+      expect(replyRes.status).toBe(200);
+      const replied = ((await replyRes.json()) as any).ticket;
+      expect(replied.status).toBe('RESOLVIDO');
+      expect(replied.messages.length).toBe(2);
+
+      // 7. Desativar Usuário B invalida a sessão imediatamente
+      const deactRes = await adminFetch(`/api/admin/users/${userBCreated.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: false })
+      });
+      expect(deactRes.status).toBe(200);
+      expect((await userBFetch('/api/processes')).status).toBe(401);
+    } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

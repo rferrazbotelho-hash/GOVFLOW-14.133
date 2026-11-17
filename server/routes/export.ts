@@ -6,8 +6,19 @@ import {
   exportDossierZip,
   exportSinglePieceDocx
 } from '../services/exportDocx.js';
+import { canAccessProcess, requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+
+router.use('/processes', requireAuth);
+router.use('/processes/:id', (req, res, next) => {
+  const access = canAccessProcess(String(req.params.id), req.authUser!);
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error });
+    return;
+  }
+  next();
+});
 
 function safeFileSlug(str: string): string {
   return (str || 'processo').replace(/[^a-zA-Z0-9_-]+/g, '_');

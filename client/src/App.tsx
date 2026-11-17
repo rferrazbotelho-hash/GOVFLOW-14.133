@@ -1,15 +1,30 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import type { AiSettings, Institution, PlatformOnlineStatus, ProcessBundle } from '@shared/types';
-import { api, type ProcessListItem } from './api/client';
+import { Loader2 } from 'lucide-react';
+import type {
+  AiSettings,
+  Institution,
+  PlatformOnlineStatus,
+  ProcessBundle,
+  UserAccount
+} from '@shared/types';
+import { api, setUnauthorizedHandler, type ProcessListItem } from './api/client';
 import { Sidebar, type AppView } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
 import { InstitutionSetupView } from './components/InstitutionSetupView';
 import { ProcessWorkspaceView } from './components/ProcessWorkspaceView';
+import { AdminPanelView } from './components/AdminPanelView';
 import { CertameConfigModal } from './components/CertameConfigModal';
 import { AiSettingsModal } from './components/AiSettingsModal';
 import { OnlineTestModal } from './components/OnlineTestModal';
+import { LoginView } from './components/LoginView';
+import { UserProfileModal } from './components/UserProfileModal';
+import { AppInfoSupportWidget } from './components/AppInfoSupportWidget';
 
 export function App() {
+  const [authChecking, setAuthChecking] = useState(true);
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+
   const [activeView, setActiveView] = useState<AppView>('dashboard');
   const [institutions, setInstitutions] = useState<Institution[]>([]);
   const [activeInstitutionId, setActiveInstitutionId] = useState<string>('');
@@ -25,6 +40,20 @@ export function App() {
   const [showOnlineModal, setShowOnlineModal] = useState(false);
   const [onlineStatus, setOnlineStatus] = useState<PlatformOnlineStatus | null>(null);
 
+  const clearWorkspaceState = useCallback(() => {
+    setInstitutions([]);
+    setActiveInstitutionId('');
+    setProcesses([]);
+    setActiveBundle(null);
+    setAiSettings(null);
+    setOnlineStatus(null);
+    setActiveView('dashboard');
+    setShowCertameModal(false);
+    setShowAiModal(false);
+    setShowOnlineModal(false);
+    setShowProfileModal(false);
+  }, []);
+
   const loadAll = useCallback(async () => {
     const [instList, procList, ai, online] = await Promise.all([
       api.listInstitutions(),
@@ -37,19 +66,59 @@ export function App() {
     setAiSettings(ai);
     if (online) setOnlineStatus(online);
 
-    if (!activeInstitutionId && instList.length > 0) {
-      setActiveInstitutionId(instList[0].id);
-    }
+    setActiveInstitutionId((prev) => {
+      if (prev && instList.some((i) => i.id === prev)) return prev;
+      return instList[0]?.id || '';
+    });
     return { instList, procList };
-  }, [activeInstitutionId]);
+  }, []);
 
   useEffect(() => {
-    loadAll().then(({ procList }) => {
-      if (procList.length > 0 && !activeBundle) {
-        api.getProcess(procList[0].id).then(setActiveBundle).catch(() => {});
-      }
+    setUnauthorizedHandler(() => {
+      setCurrentUser(null);
+      clearWorkspaceState();
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => setUnauthorizedHandler(null);
+  }, [clearWorkspaceState]);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getMe()
+      .then(async (me) => {
+        if (!active) return;
+        if (me.authenticated && me.user) {
+          setCurrentUser(me.user);
+          const { procList } = await loadAll();
+          if (active && procList.length > 0) {
+            api.getProcess(procList[0].id).then((b) => active && setActiveBundle(b)).catch(() => {});
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setAuthChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [loadAll]);
+
+  const handleAuthenticated = async (user: UserAccount, goToAdmin = false) => {
+    clearWorkspaceState();
+    setCurrentUser(user);
+    const { procList } = await loadAll();
+    if (procList.length > 0) {
+      api.getProcess(procList[0].id).then(setActiveBundle).catch(() => {});
+    }
+    setActiveView(goToAdmin && user.role === 'ADMIN' ? 'admin' : 'dashboard');
+  };
+
+  const handleLogout = async () => {
+    await api.logout().catch(() => {});
+    setCurrentUser(null);
+    clearWorkspaceState();
+  };
 
   const openProcess = async (processId: string) => {
     const bundle = await api.getProcess(processId);
@@ -90,12 +159,33 @@ export function App() {
     await openProcess(cloned.process.id);
   };
 
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-[#F3F6FA] flex items-center justify-center">
+        <div className="inline-flex items-center gap-2 text-sm font-semibold text-[#071D41]">
+          <Loader2 className="w-5 h-5 animate-spin text-[#1351B4]" />
+          Verificando sessão GOVFLOW 14.133...
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <>
+        <LoginView onAuthenticated={handleAuthenticated} />
+        <AppInfoSupportWidget currentUser={null} />
+      </>
+    );
+  }
+
   const activeInstitution =
     institutions.find((i) => i.id === activeInstitutionId) || institutions[0] || null;
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-[#F3F6FA]">
       <Sidebar
+        currentUser={currentUser}
         activeView={activeView}
         onNavigate={setActiveView}
         activeBundle={activeBundle}
@@ -108,11 +198,13 @@ export function App() {
         }}
         onOpenAiSettings={() => setShowAiModal(true)}
         onOpenOnlineModal={() => setShowOnlineModal(true)}
+        onOpenProfile={() => setShowProfileModal(true)}
+        onLogout={handleLogout}
         aiSettings={aiSettings}
         onlineStatus={onlineStatus}
       />
 
-      <main className="flex-1 min-w-0 flex flex-col">
+      <main className="flex-1 min-w-0 flex flex-col pb-12">
         {activeView === 'dashboard' && (
           <DashboardView
             processes={processes}
@@ -137,6 +229,10 @@ export function App() {
             onSelectInstitution={setActiveInstitutionId}
             onInstitutionUpdated={handleInstitutionUpdated}
           />
+        )}
+
+        {activeView === 'admin' && currentUser.role === 'ADMIN' && (
+          <AdminPanelView currentUser={currentUser} onOpenProcess={openProcess} />
         )}
 
         {activeView === 'workspace' && activeBundle && (
@@ -187,6 +283,16 @@ export function App() {
           }}
         />
       )}
+
+      {showProfileModal && (
+        <UserProfileModal
+          user={currentUser}
+          onClose={() => setShowProfileModal(false)}
+          onUpdated={setCurrentUser}
+        />
+      )}
+
+      <AppInfoSupportWidget currentUser={currentUser} />
     </div>
   );
 }

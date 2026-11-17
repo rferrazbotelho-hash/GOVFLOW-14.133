@@ -1,8 +1,11 @@
 import type {
+  AdminOverview,
+  AdminUserSummary,
   AgentPiece,
   AiConnectivityTestResult,
   AiGeminiResetResult,
   AiSettings,
+  AppInfo,
   Dotacao,
   Institution,
   ParsedPriceResearchResult,
@@ -11,12 +14,24 @@ import type {
   ProcessBundle,
   ProcurementProcess,
   Secretario,
+  SupportChannel,
+  SupportTicket,
+  SupportTicketStatus,
   TcuJurisprudenceTheme,
-  TcuPrecedent
+  TcuPrecedent,
+  UserAccount,
+  UserRole
 } from '@shared/types';
+
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  unauthorizedHandler = fn;
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
+    credentials: 'include',
     ...init,
     headers: {
       ...(init?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
@@ -24,6 +39,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     }
   });
   if (!res.ok) {
+    if (res.status === 401 && !url.startsWith('/api/auth/') && unauthorizedHandler) {
+      unauthorizedHandler();
+    }
     let msg = `Erro HTTP ${res.status}`;
     try {
       const data = await res.json();
@@ -180,7 +198,7 @@ export const api = {
     }),
 
   downloadExportFile: async (url: string, fallbackFilename: string): Promise<string> => {
-    const res = await fetch(url);
+    const res = await fetch(url, { credentials: 'include' });
     if (!res.ok) {
       let msg = `Erro HTTP ${res.status} ao gerar arquivo.`;
       try {
@@ -360,5 +378,114 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data || {})
       }
-    )
+    ),
+
+  // Informações do App, Autenticação, Administração e Chamados
+  getAppInfo: () => request<AppInfo>('/api/app-info'),
+
+  getMe: () => request<{ authenticated: boolean; user: UserAccount | null }>('/api/auth/me'),
+
+  login: (username: string, password: string) =>
+    request<{ authenticated: boolean; user: UserAccount; token: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password })
+    }),
+
+  register: (data: {
+    username: string;
+    name: string;
+    email?: string;
+    department?: string;
+    password: string;
+  }) =>
+    request<{ ok: boolean; user: UserAccount; message: string }>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    }),
+
+  logout: () =>
+    request<{ ok: boolean }>('/api/auth/logout', {
+      method: 'POST'
+    }),
+
+  updateOwnProfile: (data: {
+    name?: string;
+    email?: string;
+    department?: string;
+    currentPassword?: string;
+    newPassword?: string;
+  }) =>
+    request<{ user: UserAccount }>('/api/auth/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    }),
+
+  getAdminOverview: () => request<AdminOverview>('/api/admin/overview'),
+
+  adminCreateUser: (data: {
+    username: string;
+    name: string;
+    email?: string;
+    department?: string;
+    role: UserRole;
+    is_active: boolean;
+    password: string;
+  }) =>
+    request<AdminUserSummary>('/api/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    }),
+
+  adminUpdateUser: (
+    userId: string,
+    data: {
+      name?: string;
+      email?: string;
+      department?: string;
+      role?: UserRole;
+      is_active?: boolean;
+      password?: string;
+    }
+  ) =>
+    request<AdminUserSummary>(`/api/admin/users/${userId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    }),
+
+  adminActivateUser: (userId: string) =>
+    request<AdminUserSummary>(`/api/admin/users/${userId}/activate`, {
+      method: 'POST'
+    }),
+
+  adminDeleteUser: (userId: string) =>
+    request<{ ok: boolean }>(`/api/admin/users/${userId}`, {
+      method: 'DELETE'
+    }),
+
+  listSupportTickets: () => request<SupportTicket[]>('/api/support/tickets'),
+
+  createSupportTicket: (data: {
+    requester_name?: string;
+    requester_email?: string;
+    requester_phone?: string;
+    channel: SupportChannel;
+    subject: string;
+    message: string;
+  }) =>
+    request<{ ticket: SupportTicket }>('/api/support/tickets', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    }),
+
+  replySupportTicket: (ticketId: string, message: string, status?: SupportTicketStatus) =>
+    request<{ ticket: SupportTicket }>(`/api/support/tickets/${ticketId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ message, status })
+    }),
+
+  updateSupportTicketStatus: (ticketId: string, status: SupportTicketStatus) =>
+    request<{ ticket: SupportTicket }>(`/api/support/tickets/${ticketId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status })
+    })
 };

@@ -4,6 +4,9 @@ import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
 import { closeDb, getDb, isServerlessRuntime } from './db/database.js';
+import authRoutes from './routes/auth.js';
+import adminRoutes from './routes/admin.js';
+import supportRoutes from './routes/support.js';
 import institutionRoutes from './routes/institution.js';
 import processesRoutes from './routes/processes.js';
 import agentsRoutes from './routes/agents.js';
@@ -16,6 +19,7 @@ export function createApp() {
   getDb();
 
   const app = express();
+  app.set('trust proxy', 1);
   app.use(cors());
   app.use(express.json({ limit: '15mb' }));
   app.use(express.urlencoded({ extended: true, limit: '15mb' }));
@@ -46,6 +50,9 @@ export function createApp() {
     }
   });
 
+  app.use('/api', authRoutes);
+  app.use('/api', supportRoutes);
+  app.use('/api', adminRoutes);
   app.use('/api', institutionRoutes);
   app.use('/api', processesRoutes);
   app.use('/api', agentsRoutes);

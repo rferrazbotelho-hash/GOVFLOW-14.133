@@ -7,9 +7,12 @@ import {
   Cpu,
   FolderKanban,
   Loader2,
+  LogOut,
   MinusCircle,
   Scale,
-  SlidersHorizontal
+  ShieldCheck,
+  SlidersHorizontal,
+  UserCog
 } from 'lucide-react';
 import {
   AGENT_DEFINITIONS,
@@ -17,13 +20,15 @@ import {
   type AgentStatus,
   type AiSettings,
   type PlatformOnlineStatus,
-  type ProcessBundle
+  type ProcessBundle,
+  type UserAccount
 } from '@shared/types';
 import { AGENT_STATUS_LABELS } from '@shared/labels';
 
-export type AppView = 'dashboard' | 'institution' | 'workspace';
+export type AppView = 'dashboard' | 'institution' | 'workspace' | 'admin';
 
 interface Props {
+  currentUser: UserAccount;
   activeView: AppView;
   onNavigate: (view: AppView) => void;
   activeBundle: ProcessBundle | null;
@@ -33,6 +38,8 @@ interface Props {
   onOpenCertameConfig: () => void;
   onOpenAiSettings: () => void;
   onOpenOnlineModal: () => void;
+  onOpenProfile: () => void;
+  onLogout: () => void;
   aiSettings: AiSettings | null;
   onlineStatus: PlatformOnlineStatus | null;
 }
@@ -72,6 +79,7 @@ function statusPillClass(status: AgentStatus, running: boolean): string {
 }
 
 export const Sidebar: React.FC<Props> = ({
+  currentUser,
   activeView,
   onNavigate,
   activeBundle,
@@ -81,6 +89,8 @@ export const Sidebar: React.FC<Props> = ({
   onOpenCertameConfig,
   onOpenAiSettings,
   onOpenOnlineModal,
+  onOpenProfile,
+  onLogout,
   aiSettings,
   onlineStatus
 }) => {
@@ -137,6 +147,24 @@ export const Sidebar: React.FC<Props> = ({
           <Building2 className="w-4 h-4 shrink-0" />
           <span>Configurações da Prefeitura</span>
         </button>
+
+        {currentUser.role === 'ADMIN' && (
+          <button
+            type="button"
+            onClick={() => onNavigate('admin')}
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+              activeView === 'admin'
+                ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
+                : 'text-amber-200 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <span className="flex items-center gap-2.5">
+              <ShieldCheck className="w-4 h-4 shrink-0" />
+              <span>Painel Administrativo</span>
+            </span>
+            <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-white/15 uppercase">ADMIN</span>
+          </button>
+        )}
 
         <button
           type="button"
@@ -276,6 +304,34 @@ export const Sidebar: React.FC<Props> = ({
           Selecione ou crie um processo no Dashboard para acompanhar a esteira dos 11 agentes autônomos.
         </div>
       )}
+
+      {/* Rodapé do Usuário Logado */}
+      <div className="p-3 border-t border-white/10 bg-[#061836] flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={onOpenProfile}
+          title="Minha Conta Individual e Senha"
+          className="min-w-0 flex-1 text-left flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-white/10 transition-colors cursor-pointer"
+        >
+          <div className="w-7 h-7 rounded-full bg-[#1351B4] flex items-center justify-center shrink-0">
+            <UserCog className="w-3.5 h-3.5 text-white" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] font-bold text-white truncate">{currentUser.name}</div>
+            <div className="text-[10px] text-blue-200 truncate">
+              @{currentUser.username} • {currentUser.role === 'ADMIN' ? 'Admin' : 'Individual'}
+            </div>
+          </div>
+        </button>
+        <button
+          type="button"
+          onClick={onLogout}
+          title="Sair do Sistema"
+          className="p-2 rounded-lg text-slate-300 hover:text-rose-300 hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+        >
+          <LogOut className="w-4 h-4" />
+        </button>
+      </div>
     </aside>
   );
 };
