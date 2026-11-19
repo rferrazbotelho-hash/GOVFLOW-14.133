@@ -33,12 +33,21 @@ import { api } from '../api/client';
 
 interface Props {
   currentUser: UserAccount;
-  onOpenProcess: (processId: string) => void;
+  openingProcessId?: string | null;
+  openError?: string;
+  onDismissOpenError?: () => void;
+  onOpenProcess: (processId: string) => Promise<void> | void;
 }
 
 type AdminTab = 'users' | 'processes' | 'institutions' | 'audit' | 'tickets';
 
-export const AdminPanelView: React.FC<Props> = ({ currentUser, onOpenProcess }) => {
+export const AdminPanelView: React.FC<Props> = ({
+  currentUser,
+  openingProcessId = null,
+  openError = '',
+  onDismissOpenError,
+  onOpenProcess
+}) => {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<AdminTab>('users');
@@ -271,9 +280,19 @@ export const AdminPanelView: React.FC<Props> = ({ currentUser, onOpenProcess }) 
         </div>
       </div>
 
-      {errorMsg && (
-        <div className="rounded-xl bg-rose-50 border border-rose-200 px-4 py-3 text-xs text-rose-800 font-medium">
-          {errorMsg}
+      {(errorMsg || openError) && (
+        <div role="alert" className="rounded-xl bg-rose-50 border border-rose-200 px-4 py-3 text-xs text-rose-800 font-medium flex items-center justify-between gap-2">
+          <span>{errorMsg || openError}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setErrorMsg('');
+              onDismissOpenError?.();
+            }}
+            className="text-[11px] font-bold underline cursor-pointer"
+          >
+            Fechar
+          </button>
         </div>
       )}
       {infoMsg && (
@@ -753,11 +772,21 @@ export const AdminPanelView: React.FC<Props> = ({ currentUser, onOpenProcess }) 
                 </div>
                 <button
                   type="button"
+                  disabled={openingProcessId === proc.id}
                   onClick={() => onOpenProcess(proc.id)}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#071D41] hover:bg-[#1351B4] text-white text-xs font-semibold cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#071D41] hover:bg-[#1351B4] disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
                 >
-                  Inspecionar na Esteira
-                  <ArrowRight className="w-3.5 h-3.5" />
+                  {openingProcessId === proc.id ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Abrindo...
+                    </>
+                  ) : (
+                    <>
+                      Inspecionar na Esteira
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </>
+                  )}
                 </button>
               </div>
             ))

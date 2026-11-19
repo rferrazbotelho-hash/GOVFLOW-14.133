@@ -20,7 +20,7 @@ delete process.env.OPENAI_API_KEY;
 delete process.env.GEMINI_API_KEY;
 delete process.env.GOOGLE_API_KEY;
 
-import { getDataDir, getDb, isServerlessRuntime } from '../server/db/database.js';
+import { closeDb, getDataDir, getDb, isServerlessRuntime } from '../server/db/database.js';
 import {
   approveAndSignPiece,
   createProcess,
@@ -2732,6 +2732,119 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         .prepare("DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users)")
         .run();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('mantém sessão stateless HMAC e acesso ao bundle da esteira entre instâncias serverless distintas', async () => {
+    const prevSecret = process.env.GOVFLOW_SESSION_SECRET;
+    const prevDbPath = process.env.GOVFLOW_DB_PATH;
+    const dbAPath = path.join(os.tmpdir(), `govflow-serverless-a-${Date.now()}.db`);
+    const dbBPath = path.join(os.tmpdir(), `govflow-serverless-b-${Date.now()}.db`);
+    process.env.GOVFLOW_SESSION_SECRET = 'test-shared-secret-govflow-14133';
+
+    closeDb();
+    process.env.GOVFLOW_DB_PATH = dbAPath;
+    getDb();
+    const appA = createApp();
+    const serverA = http.createServer(appA);
+    await new Promise<void>((resolve) => serverA.listen(0, '127.0.0.1', () => resolve()));
+    const baseUrlA = `http://127.0.0.1:${(serverA.address() as any).port}`;
+
+    let serverB: http.Server | null = null;
+    try {
+      const loginRes = await fetch(`${baseUrlA}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: process.env.GOVFLOW_ADMIN_USERNAME || 'admin',
+          password: process.env.GOVFLOW_ADMIN_PASSWORD || 'GovFlow@14133'
+        })
+      });
+      expect(loginRes.status).toBe(200);
+      const loginJson = (await loginRes.json()) as any;
+      expect(loginJson.token).toMatch(/^gf1\./);
+      expect(loginRes.headers.get('set-cookie')).toContain('govflow_session=');
+
+      const procsRes = await fetch(`${baseUrlA}/api/processes`, {
+        headers: { Authorization: `Bearer ${loginJson.token}` }
+      });
+      expect(procsRes.status).toBe(200);
+      const procs = (await procsRes.json()) as any[];
+      expect(procs.length).toBeGreaterThan(0);
+      const starterProcId = procs[0].id;
+      const starterInstId = procs[0].institution_id;
+
+      // Simula segunda instância serverless com banco /tmp completamente isolado
+      closeDb();
+      process.env.GOVFLOW_DB_PATH = dbBPath;
+      getDb();
+      const appB = createApp();
+      serverB = http.createServer(appB);
+      await new Promise<void>((resolve) => serverB!.listen(0, '127.0.0.1', () => resolve()));
+      const baseUrlB = `http://127.0.0.1:${(serverB.address() as any).port}`;
+
+      // Requisições paralelas de Abrir Esteira na instância B (sem sessão prévia gravada em B)
+      const [bundleRes, versionsRes, instRes] = await Promise.all([
+        fetch(`${baseUrlB}/api/processes/${starterProcId}`, {
+          headers: { Authorization: `Bearer ${loginJson.token}` }
+        }),
+        fetch(`${baseUrlB}/api/processes/${starterProcId}/agents/1/versions`, {
+          headers: { Authorization: `Bearer ${loginJson.token}` }
+        }),
+        fetch(`${baseUrlB}/api/institutions/${starterInstId}`, {
+          headers: { Authorization: `Bearer ${loginJson.token}` }
+        })
+      ]);
+      expect(bundleRes.status).toBe(200);
+      expect(versionsRes.status).toBe(200);
+      expect(instRes.status).toBe(200);
+      const bundleJson = (await bundleRes.json()) as any;
+      expect(bundleJson.process.id).toBe(starterProcId);
+      expect(bundleJson.pieces.length).toBe(11);
+
+      // Processo inexistente retorna 404 estruturado (nunca 401/500)
+      const missingRes = await fetch(`${baseUrlB}/api/processes/nao-existe-999`, {
+        headers: { Authorization: `Bearer ${loginJson.token}` }
+      });
+      expect(missingRes.status).toBe(404);
+
+      // Logout revoga token via revoked_sessions
+      const logoutRes = await fetch(`${baseUrlB}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${loginJson.token}` }
+      });
+      expect(logoutRes.status).toBe(200);
+      const afterLogoutRes = await fetch(`${baseUrlB}/api/processes/${starterProcId}`, {
+        headers: { Authorization: `Bearer ${loginJson.token}` }
+      });
+      expect(afterLogoutRes.status).toBe(401);
+    } finally {
+      await new Promise<void>((resolve) => serverA.close(() => resolve()));
+      if (serverB) {
+        await new Promise<void>((resolve) => serverB!.close(() => resolve()));
+      }
+      closeDb();
+      for (const p of [
+        dbAPath,
+        `${dbAPath}-wal`,
+        `${dbAPath}-shm`,
+        dbBPath,
+        `${dbBPath}-wal`,
+        `${dbBPath}-shm`
+      ]) {
+        if (fs.existsSync(p)) {
+          try {
+            fs.unlinkSync(p);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      if (prevSecret === undefined) delete process.env.GOVFLOW_SESSION_SECRET;
+      else process.env.GOVFLOW_SESSION_SECRET = prevSecret;
+      if (prevDbPath === undefined) delete process.env.GOVFLOW_DB_PATH;
+      else process.env.GOVFLOW_DB_PATH = prevDbPath;
+      getDb();
     }
   });
 });

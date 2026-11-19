@@ -4,6 +4,12 @@ import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
 import { closeDb, getDb, isServerlessRuntime } from './db/database.js';
+import {
+  getDbTotalChanges,
+  isServerlessBlobSyncEnabled,
+  pullServerlessDbIfUpdated,
+  pushServerlessDbSnapshot
+} from './db/serverlessSync.js';
 import authRoutes from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import supportRoutes from './routes/support.js';
@@ -35,7 +41,11 @@ export function createApp() {
         service: 'GOVFLOW 14.133',
         db_ok: true,
         journal_mode: walRow?.journal_mode || 'wal',
-        persistence_mode: isServerlessRuntime() ? 'serverless_tmp' : 'local_disk',
+        persistence_mode: isServerlessRuntime()
+          ? isServerlessBlobSyncEnabled()
+            ? 'vercel_blob_sqlite'
+            : 'serverless_tmp'
+          : 'local_disk',
         uptime_seconds: Math.round(process.uptime()),
         memory_mb: Math.round(process.memoryUsage().rss / (1024 * 1024)),
         timestamp: new Date().toISOString()
@@ -50,6 +60,53 @@ export function createApp() {
       });
     }
   });
+
+  if (isServerlessBlobSyncEnabled()) {
+    app.use('/api', async (req, res, next) => {
+      if (req.path === '/health' || req.path === '/app-info' || req.method === 'OPTIONS') {
+        return next();
+      }
+
+      await pullServerlessDbIfUpdated();
+
+      const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase());
+      if (!isMutation) {
+        return next();
+      }
+
+      const beforeChanges = getDbTotalChanges();
+      let flushed = false;
+      const origJson = res.json.bind(res);
+      const origSend = res.send.bind(res);
+
+      const flushMutation = async () => {
+        if (flushed) return;
+        flushed = true;
+        if (res.statusCode < 500 && getDbTotalChanges() > beforeChanges) {
+          await pushServerlessDbSnapshot();
+        }
+      };
+
+      res.json = ((body?: any) => {
+        flushMutation()
+          .catch(() => {})
+          .finally(() => origJson(body));
+        return res;
+      }) as typeof res.json;
+
+      res.send = ((body?: any) => {
+        if (flushed) {
+          return origSend(body);
+        }
+        flushMutation()
+          .catch(() => {})
+          .finally(() => origSend(body));
+        return res;
+      }) as typeof res.send;
+
+      return next();
+    });
+  }
 
   app.use('/api', authRoutes);
   app.use('/api', supportRoutes);

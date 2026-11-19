@@ -24,7 +24,10 @@ interface Props {
   processes: ProcessListItem[];
   activeInstitution: Institution | null;
   onlineStatus: PlatformOnlineStatus | null;
-  onOpenProcess: (processId: string) => void;
+  openingProcessId?: string | null;
+  openError?: string;
+  onDismissOpenError?: () => void;
+  onOpenProcess: (processId: string) => Promise<void> | void;
   onNewProcess: () => void;
   onOpenInstitutionSetup: () => void;
   onOpenOnlineModal: () => void;
@@ -36,6 +39,9 @@ export const DashboardView: React.FC<Props> = ({
   processes,
   activeInstitution,
   onlineStatus,
+  openingProcessId = null,
+  openError = '',
+  onDismissOpenError,
   onOpenProcess,
   onNewProcess,
   onOpenInstitutionSetup,
@@ -219,13 +225,20 @@ export const DashboardView: React.FC<Props> = ({
             />
           </div>
         </div>
-        {actionError && (
-          <div className="mx-5 mt-3 rounded-lg bg-rose-50 border border-rose-200 px-3 py-2 text-xs text-rose-800 flex items-center justify-between gap-2">
+        {(actionError || openError) && (
+          <div role="alert" className="mx-5 mt-3 rounded-lg bg-rose-50 border border-rose-200 px-3 py-2 text-xs text-rose-800 flex items-center justify-between gap-2">
             <span className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              {actionError}
+              {actionError || openError}
             </span>
-            <button type="button" onClick={() => setActionError('')} className="text-[11px] font-bold underline cursor-pointer">
+            <button
+              type="button"
+              onClick={() => {
+                setActionError('');
+                onDismissOpenError?.();
+              }}
+              className="text-[11px] font-bold underline cursor-pointer"
+            >
               Fechar
             </button>
           </div>
@@ -418,11 +431,21 @@ export const DashboardView: React.FC<Props> = ({
                       )}
                       <button
                         type="button"
+                        disabled={openingProcessId === proc.id}
                         onClick={() => onOpenProcess(proc.id)}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#071D41] hover:bg-[#1351B4] text-white text-xs font-semibold cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#071D41] hover:bg-[#1351B4] disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
                       >
-                        Abrir Esteira
-                        <ArrowRight className="w-3.5 h-3.5" />
+                        {openingProcessId === proc.id ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            Abrindo...
+                          </>
+                        ) : (
+                          <>
+                            Abrir Esteira
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </>
+                        )}
                       </button>
                     </div>
                   </div>

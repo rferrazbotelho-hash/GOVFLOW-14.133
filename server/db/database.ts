@@ -23,12 +23,16 @@ export function getDataDir(): string {
   return dir;
 }
 
+export function getDefaultDbPath(): string {
+  return process.env.GOVFLOW_DB_PATH || path.join(getDataDir(), 'govflow.db');
+}
+
 export function getDb(customPath?: string): DatabaseSync {
   if (dbInstance && !customPath) {
     return dbInstance;
   }
 
-  const dbPath = customPath || process.env.GOVFLOW_DB_PATH || path.join(getDataDir(), 'govflow.db');
+  const dbPath = customPath || getDefaultDbPath();
   const dbDir = path.dirname(dbPath);
   if (dbPath !== ':memory:' && !fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
@@ -238,6 +242,11 @@ function migrateSchema(db: DatabaseSync) {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS revoked_sessions (
+      sid TEXT PRIMARY KEY,
+      expires_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS user_settings (

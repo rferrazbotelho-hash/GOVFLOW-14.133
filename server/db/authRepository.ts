@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getDb, seedStarterWorkspaceForUser } from './database.js';
+import { getDb, isServerlessRuntime, seedStarterWorkspaceForUser } from './database.js';
 import { getPublicAiSettings } from './repository.js';
 import {
   generateSessionToken,
@@ -292,13 +292,141 @@ export function updateOwnProfile(
   return getUserById(userId)!;
 }
 
+interface SignedSessionPayload {
+  v: 1;
+  sid: string;
+  uid: string;
+  usr: string;
+  name: string;
+  email: string;
+  dept: string;
+  role: UserRole;
+  act: 1;
+  iat: number;
+  exp: number;
+}
+
+function getSessionSigningSecret(): string {
+  const envSecret = String(process.env.GOVFLOW_SESSION_SECRET || '').trim();
+  if (envSecret) {
+    return envSecret;
+  }
+
+  if (isServerlessRuntime()) {
+    const sharedEnvSeed = String(
+      process.env.BLOB_READ_WRITE_TOKEN ||
+        process.env.OPENAI_API_KEY ||
+        process.env.GEMINI_API_KEY ||
+        process.env.GOOGLE_API_KEY ||
+        ''
+    ).trim();
+    if (sharedEnvSeed) {
+      return crypto
+        .createHash('sha256')
+        .update(`govflow-session-v1:${sharedEnvSeed}`)
+        .digest('hex');
+    }
+  }
+
+  const db = getDb();
+  const row = db
+    .prepare("SELECT value FROM app_settings WHERE key = 'session_signing_secret' LIMIT 1")
+    .get() as { value?: string } | undefined;
+  if (row?.value) {
+    return String(row.value);
+  }
+
+  const generated = crypto.randomBytes(32).toString('hex');
+  db.prepare(
+    "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('session_signing_secret', ?)"
+  ).run(generated);
+  const stored = db
+    .prepare("SELECT value FROM app_settings WHERE key = 'session_signing_secret' LIMIT 1")
+    .get() as { value?: string } | undefined;
+  return stored?.value ? String(stored.value) : generated;
+}
+
+function signSessionPayload(payload: SignedSessionPayload): string {
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signingInput = `gf1.${payloadB64}`;
+  const sigB64 = crypto
+    .createHmac('sha256', getSessionSigningSecret())
+    .update(signingInput)
+    .digest('base64url');
+  return `${signingInput}.${sigB64}`;
+}
+
+function verifySignedSessionToken(rawToken: string): SignedSessionPayload | null {
+  if (!rawToken.startsWith('gf1.')) return null;
+  const parts = rawToken.split('.');
+  if (parts.length !== 3 || parts[0] !== 'gf1' || !parts[1] || !parts[2]) {
+    return null;
+  }
+
+  const signingInput = `gf1.${parts[1]}`;
+  const expectedSig = crypto
+    .createHmac('sha256', getSessionSigningSecret())
+    .update(signingInput)
+    .digest();
+  let providedSig: Buffer;
+  try {
+    providedSig = Buffer.from(parts[2], 'base64url');
+  } catch {
+    return null;
+  }
+  if (
+    expectedSig.length !== providedSig.length ||
+    !crypto.timingSafeEqual(expectedSig, providedSig)
+  ) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(parts[1], 'base64url').toString('utf8')
+    ) as SignedSessionPayload;
+    if (
+      !parsed ||
+      parsed.v !== 1 ||
+      parsed.act !== 1 ||
+      typeof parsed.sid !== 'string' ||
+      typeof parsed.uid !== 'string' ||
+      typeof parsed.usr !== 'string' ||
+      Number(parsed.exp) <= Date.now()
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function createSession(userId: string, ttlDays = 7): { token: string; expiresAt: string } {
   const db = getDb();
-  const token = generateSessionToken();
-  const tokenHash = hashSessionToken(token);
+  const userRow = db.prepare('SELECT * FROM users WHERE id = ? LIMIT 1').get(userId) as any;
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAtMs = now.getTime() + ttlDays * 24 * 60 * 60 * 1000;
+  const expiresAt = new Date(expiresAtMs).toISOString();
 
+  const token =
+    userRow && Number(userRow.is_active)
+      ? signSessionPayload({
+          v: 1,
+          sid: crypto.randomUUID(),
+          uid: String(userRow.id),
+          usr: String(userRow.username),
+          name: String(userRow.name || userRow.username),
+          email: String(userRow.email || ''),
+          dept: String(userRow.department || ''),
+          role: userRow.role === 'ADMIN' ? 'ADMIN' : 'USER',
+          act: 1,
+          iat: now.getTime(),
+          exp: expiresAtMs
+        })
+      : generateSessionToken();
+
+  const tokenHash = hashSessionToken(token);
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now.toISOString());
   db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(
     tokenHash,
@@ -313,8 +441,53 @@ export function createSession(userId: string, ttlDays = 7): { token: string; exp
 export function getSessionUser(rawToken: string): UserAccount | null {
   if (!rawToken) return null;
   const db = getDb();
-  const tokenHash = hashSessionToken(rawToken);
   const now = new Date().toISOString();
+
+  const signed = verifySignedSessionToken(rawToken);
+  if (signed) {
+    db.prepare('DELETE FROM revoked_sessions WHERE expires_at <= ?').run(now);
+    const revoked = db
+      .prepare('SELECT 1 FROM revoked_sessions WHERE sid = ? LIMIT 1')
+      .get(signed.sid);
+    if (revoked) return null;
+
+    let userRow = db.prepare('SELECT * FROM users WHERE id = ? LIMIT 1').get(signed.uid) as any;
+    if (!userRow) {
+      const placeholderHash = hashPassword(crypto.randomBytes(24).toString('hex'));
+      db.prepare(`
+        INSERT OR IGNORE INTO users (
+          id, username, name, email, department, role, password_hash, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        signed.uid,
+        signed.usr,
+        signed.name || signed.usr,
+        signed.email || '',
+        signed.dept || '',
+        signed.role === 'ADMIN' ? 'ADMIN' : 'USER',
+        placeholderHash,
+        now,
+        now
+      );
+      userRow = db.prepare('SELECT * FROM users WHERE id = ? LIMIT 1').get(signed.uid) as any;
+    }
+
+    if (!userRow || !Number(userRow.is_active)) return null;
+
+    const hasInst = db
+      .prepare('SELECT 1 FROM institutions WHERE owner_user_id = ? LIMIT 1')
+      .get(String(userRow.id));
+    if (!hasInst) {
+      seedStarterWorkspaceForUser(db, String(userRow.id), {
+        requesterName: String(userRow.name || signed.name || 'Gestor GovFlow'),
+        useCanonicalIds: String(userRow.id) === 'admin-01'
+      });
+    }
+
+    return mapUserRow(userRow);
+  }
+
+  const tokenHash = hashSessionToken(rawToken);
   const row = db
     .prepare(`
       SELECT u.*
@@ -331,8 +504,17 @@ export function getSessionUser(rawToken: string): UserAccount | null {
 
 export function deleteSession(rawToken: string): void {
   if (!rawToken) return;
+  const db = getDb();
   const tokenHash = hashSessionToken(rawToken);
-  getDb().prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+
+  const signed = verifySignedSessionToken(rawToken);
+  if (signed) {
+    db.prepare('INSERT OR REPLACE INTO revoked_sessions (sid, expires_at) VALUES (?, ?)').run(
+      signed.sid,
+      new Date(signed.exp).toISOString()
+    );
+  }
 }
 
 export function getUserOnlineTestMode(userId?: string): boolean {

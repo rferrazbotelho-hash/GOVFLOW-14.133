@@ -147,11 +147,30 @@ export const ProcessWorkspaceView: React.FC<Props> = ({
   ]);
 
   useEffect(() => {
-    api.getInstitutionDetail(bundle.institution.id).then((res) => {
-      setSecretarios(res.secretarios);
-      setDotacoes(res.dotacoes);
-    });
+    api
+      .getInstitutionDetail(bundle.institution.id)
+      .then((res) => {
+        setSecretarios(res.secretarios);
+        setDotacoes(res.dotacoes);
+      })
+      .catch(() => {
+        setSecretarios([]);
+        setDotacoes([]);
+      });
   }, [bundle.institution.id]);
+
+  if (!piece || !def) {
+    return (
+      <div className="p-8 max-w-2xl mx-auto">
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900 space-y-2">
+          <div className="font-bold">Peça da esteira não localizada neste processo</div>
+          <p className="text-xs text-amber-800">
+            Não foi possível carregar os dados da etapa selecionada. Retorne ao Painel de Processos e tente abrir a esteira novamente.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const activePieces = bundle.pieces.filter((p) => p.status !== 'DISPENSADO');
   const currentActiveIdx = activePieces.findIndex((p) => p.agent_number === piece.agent_number);

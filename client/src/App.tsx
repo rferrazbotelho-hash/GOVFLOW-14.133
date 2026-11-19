@@ -33,6 +33,8 @@ export function App() {
   const [activeBundle, setActiveBundle] = useState<ProcessBundle | null>(null);
   const [selectedAgentNumber, setSelectedAgentNumber] = useState<number>(1);
   const [runningAgentNumber, setRunningAgentNumber] = useState<number | null>(null);
+  const [openingProcessId, setOpeningProcessId] = useState<string | null>(null);
+  const [workspaceError, setWorkspaceError] = useState('');
 
   const [showCertameModal, setShowCertameModal] = useState(false);
   const [certameEditMode, setCertameEditMode] = useState(false);
@@ -46,6 +48,8 @@ export function App() {
     setActiveInstitutionId('');
     setProcesses([]);
     setActiveBundle(null);
+    setOpeningProcessId(null);
+    setWorkspaceError('');
     setAiSettings(null);
     setOnlineStatus(null);
     setActiveView('dashboard');
@@ -122,14 +126,30 @@ export function App() {
   };
 
   const openProcess = async (processId: string) => {
-    const bundle = await api.getProcess(processId);
-    setActiveBundle(bundle);
-    setActiveInstitutionId(bundle.institution.id);
-    const firstPending = bundle.pieces.find(
-      (p) => p.status !== 'APROVADO' && p.status !== 'DISPENSADO'
-    );
-    setSelectedAgentNumber(firstPending ? firstPending.agent_number : 1);
-    setActiveView('workspace');
+    setWorkspaceError('');
+    setOpeningProcessId(processId);
+    try {
+      const bundle = await api.getProcess(processId);
+      if (!bundle || !bundle.process || !bundle.institution) {
+        throw new Error('Dados incompletos do processo retornados pelo servidor.');
+      }
+      setActiveBundle(bundle);
+      setActiveInstitutionId(bundle.institution.id);
+      const pieces = Array.isArray(bundle.pieces) ? bundle.pieces : [];
+      const firstPending = pieces.find(
+        (p) => p.status !== 'APROVADO' && p.status !== 'DISPENSADO'
+      );
+      setSelectedAgentNumber(firstPending ? firstPending.agent_number : pieces[0]?.agent_number ?? 1);
+      setActiveView('workspace');
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Não foi possível abrir a esteira do processo.';
+      setWorkspaceError(msg);
+    } finally {
+      setOpeningProcessId(null);
+    }
   };
 
   const handleBundleUpdated = async (updated: ProcessBundle) => {
@@ -211,6 +231,9 @@ export function App() {
             processes={processes}
             activeInstitution={activeInstitution}
             onlineStatus={onlineStatus}
+            openingProcessId={openingProcessId}
+            openError={workspaceError}
+            onDismissOpenError={() => setWorkspaceError('')}
             onOpenProcess={openProcess}
             onNewProcess={() => {
               setCertameEditMode(false);
@@ -240,7 +263,13 @@ export function App() {
         )}
 
         {activeView === 'admin' && currentUser.role === 'ADMIN' && (
-          <AdminPanelView currentUser={currentUser} onOpenProcess={openProcess} />
+          <AdminPanelView
+            currentUser={currentUser}
+            openingProcessId={openingProcessId}
+            openError={workspaceError}
+            onDismissOpenError={() => setWorkspaceError('')}
+            onOpenProcess={openProcess}
+          />
         )}
 
         {activeView === 'workspace' && activeBundle && (
