@@ -274,7 +274,7 @@ export function sanitizeTcuPrecedents(raw: unknown): TcuPrecedent[] {
  * dando prioridade aos acórdãos expressamente vinculados pela Procuradoria/Gestor.
  */
 export function selectContextualTcuPrecedents(params: {
-  proc: ProcurementProcess;
+  proc: Partial<ProcurementProcess>;
   pinned?: TcuPrecedent[];
 }): Array<TcuPrecedent & { vinculadoManualmente: boolean }> {
   const pinnedList = sanitizeTcuPrecedents(params.pinned ?? params.proc.tcu_acordaos_vinculados ?? []);

@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Clock,
   Cpu,
+  FileCheck2,
   FolderKanban,
   Loader2,
   LogOut,
@@ -25,7 +26,7 @@ import {
 } from '@shared/types';
 import { AGENT_STATUS_LABELS } from '@shared/labels';
 
-export type AppView = 'dashboard' | 'institution' | 'workspace' | 'admin';
+export type AppView = 'dashboard' | 'institution' | 'contracts' | 'workspace' | 'admin';
 
 interface Props {
   currentUser: UserAccount;
@@ -146,6 +147,24 @@ export const Sidebar: React.FC<Props> = ({
         >
           <Building2 className="w-4 h-4 shrink-0" />
           <span>Configurações da Prefeitura</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate('contracts')}
+          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+            activeView === 'contracts'
+              ? 'bg-[#1351B4] text-white shadow-xs'
+              : 'text-slate-300 hover:bg-white/10 hover:text-white'
+          }`}
+        >
+          <span className="flex items-center gap-2.5">
+            <FileCheck2 className="w-4 h-4 shrink-0" />
+            <span>Análise de Contratos</span>
+          </span>
+          <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-white/10 text-blue-200 uppercase">
+            Art. 92
+          </span>
         </button>
 
         {currentUser.role === 'ADMIN' && (

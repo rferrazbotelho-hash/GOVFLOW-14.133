@@ -4,10 +4,13 @@ import { getDb } from './database.js';
 import {
   clearGeminiAuthCache,
   DEFAULT_GEMINI_MODEL,
+  getEffectiveAiEnvSetting,
   normalizeGeminiModelName,
   reloadGeminiDotEnv,
   resolveGeminiCredential,
+  resolveOpenAiApiKey,
   validateManualGeminiApiKey,
+  validateManualOpenAiApiKey,
   type GeminiCredentialResolution
 } from '../services/geminiAuth.js';
 import { sanitizeTcuPrecedents } from '../services/tcuJurisprudence.js';
@@ -1495,6 +1498,7 @@ export interface ResolvedAiConfig {
   openaiApiKey: string;
   openaiModel: string;
   openaiBaseUrl: string;
+  gemInstructions: string;
 }
 
 function readSettingsMap(userId?: string): Map<string, string> {
@@ -1535,18 +1539,30 @@ function deleteScopedSetting(key: string, userId?: string): void {
 export function getAiConfigRaw(userId?: string): ResolvedAiConfig {
   const map = readSettingsMap(userId);
 
-  const provider = normalizeAiProviderMode(map.get('ai_provider') || process.env.AI_PROVIDER);
+  const provider = normalizeAiProviderMode(
+    map.get('ai_provider') || getEffectiveAiEnvSetting('AI_PROVIDER')
+  );
   const geminiResolution = resolveGeminiCredential(map.get('gemini_api_key') ?? '');
   const geminiApiKey = geminiResolution.apiKey || '';
   const geminiModel = normalizeGeminiModelName(
-    map.get('gemini_model') ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL
+    map.get('gemini_model') || getEffectiveAiEnvSetting('GEMINI_MODEL') || DEFAULT_GEMINI_MODEL
   );
-  const openaiApiKey = (map.get('openai_api_key') ?? process.env.OPENAI_API_KEY ?? '').trim();
+  const openaiResolution = resolveOpenAiApiKey(map.get('openai_api_key') ?? '');
+  const openaiApiKey = openaiResolution.apiKey;
   const openaiModel =
-    (map.get('openai_model') ?? process.env.OPENAI_MODEL ?? 'gpt-4o-mini').trim() || 'gpt-4o-mini';
+    (map.get('openai_model') || getEffectiveAiEnvSetting('OPENAI_MODEL') || 'gpt-4o-mini').trim() ||
+    'gpt-4o-mini';
   const openaiBaseUrl =
-    (map.get('openai_base_url') ?? process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').trim() ||
-    'https://api.openai.com/v1';
+    (
+      map.get('openai_base_url') ||
+      getEffectiveAiEnvSetting('OPENAI_BASE_URL') ||
+      'https://api.openai.com/v1'
+    ).trim() || 'https://api.openai.com/v1';
+  const gemInstructions = (
+    map.get('gem_instructions') ??
+    getEffectiveAiEnvSetting('GOVFLOW_GEM_INSTRUCTIONS') ??
+    ''
+  ).trim();
 
   let effectiveProvider: EffectiveAiProvider = 'local';
   let authSource: AiAuthSource = 'none';
@@ -1605,7 +1621,8 @@ export function getAiConfigRaw(userId?: string): ResolvedAiConfig {
     geminiModel,
     openaiApiKey,
     openaiModel,
-    openaiBaseUrl
+    openaiBaseUrl,
+    gemInstructions
   };
 }
 
@@ -1643,6 +1660,7 @@ export function getPublicAiSettings(userId?: string): AiSettings {
     geminiModel: raw.geminiModel,
     openaiModel: raw.openaiModel,
     openaiBaseUrl: raw.openaiBaseUrl,
+    gemInstructions: raw.gemInstructions,
     hasGeminiKey: raw.geminiResolution.hasCredential,
     hasOpenaiKey: Boolean(raw.openaiApiKey.trim())
   };
@@ -1656,6 +1674,7 @@ export function updateAiSettings(
     openaiApiKey?: string;
     openaiModel?: string;
     openaiBaseUrl?: string;
+    gemInstructions?: string;
   },
   userId?: string
 ): AiSettings {
@@ -1678,13 +1697,29 @@ export function updateAiSettings(
     upsertScopedSetting('gemini_model', cleanModel, userId);
   }
   if (patch.openaiApiKey !== undefined && patch.openaiApiKey !== '***') {
-    upsertScopedSetting('openai_api_key', patch.openaiApiKey.trim(), userId);
+    const validatedOpenAi = validateManualOpenAiApiKey(patch.openaiApiKey);
+    if ('error' in validatedOpenAi) {
+      throw new Error(validatedOpenAi.error);
+    }
+    if (validatedOpenAi.key === '') {
+      deleteScopedSetting('openai_api_key', userId);
+    } else if (validatedOpenAi.key !== '***') {
+      upsertScopedSetting('openai_api_key', validatedOpenAi.key, userId);
+    }
   }
   if (patch.openaiModel !== undefined) {
     upsertScopedSetting('openai_model', patch.openaiModel.trim(), userId);
   }
   if (patch.openaiBaseUrl !== undefined) {
     upsertScopedSetting('openai_base_url', patch.openaiBaseUrl.trim(), userId);
+  }
+  if (patch.gemInstructions !== undefined) {
+    const cleanGem = patch.gemInstructions.trim();
+    if (!cleanGem) {
+      deleteScopedSetting('gem_instructions', userId);
+    } else {
+      upsertScopedSetting('gem_instructions', cleanGem, userId);
+    }
   }
   clearGeminiAuthCache();
   return getPublicAiSettings(userId);

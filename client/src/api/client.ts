@@ -6,6 +6,8 @@ import type {
   AiGeminiResetResult,
   AiSettings,
   AppInfo,
+  ContractAnalysisRecord,
+  ContractExtractionPreview,
   Dotacao,
   Institution,
   ParsedPriceResearchResult,
@@ -328,6 +330,7 @@ export const api = {
     openaiApiKey?: string;
     openaiModel?: string;
     openaiBaseUrl?: string;
+    gemInstructions?: string;
   }) =>
     request<AiSettings>('/api/settings/ai', {
       method: 'PUT',
@@ -487,5 +490,65 @@ export const api = {
     request<{ ticket: SupportTicket }>(`/api/support/tickets/${ticketId}/status`, {
       method: 'PUT',
       body: JSON.stringify({ status })
+    }),
+
+  // Análise de Contratos (Lei nº 14.133/2021)
+  listContractAnalyses: () => request<ContractAnalysisRecord[]>('/api/contracts/analyses'),
+
+  getContractAnalysis: (id: string) => request<ContractAnalysisRecord>(`/api/contracts/analyses/${id}`),
+
+  extractContractFile: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return request<ContractExtractionPreview>('/api/contracts/extract', {
+      method: 'POST',
+      body: fd
+    });
+  },
+
+  analyzeContractFile: (params: {
+    file: File;
+    title?: string;
+    analysis_focus?: string;
+    institution_id?: string;
+  }) => {
+    const fd = new FormData();
+    fd.append('file', params.file);
+    if (params.title) fd.append('title', params.title);
+    if (params.analysis_focus) fd.append('analysis_focus', params.analysis_focus);
+    if (params.institution_id) fd.append('institution_id', params.institution_id);
+    return request<ContractAnalysisRecord>('/api/contracts/analyze', {
+      method: 'POST',
+      body: fd
+    });
+  },
+
+  analyzeContractPayload: (data: {
+    title?: string;
+    contract_text?: string;
+    analysis_focus?: string;
+    institution_id?: string;
+    process_id?: string;
+    agent_number?: number;
+    source_filename?: string;
+    source_format?: 'PDF' | 'WORD' | 'TXT' | 'HTML';
+  }) =>
+    request<ContractAnalysisRecord>('/api/contracts/analyze', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    }),
+
+  reanalyzeContract: (
+    id: string,
+    data?: { title?: string; contract_text?: string; analysis_focus?: string }
+  ) =>
+    request<ContractAnalysisRecord>(`/api/contracts/analyses/${id}/reanalyze`, {
+      method: 'POST',
+      body: JSON.stringify(data || {})
+    }),
+
+  deleteContractAnalysis: (id: string) =>
+    request<{ ok: boolean }>(`/api/contracts/analyses/${id}`, {
+      method: 'DELETE'
     })
 };

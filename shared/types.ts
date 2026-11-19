@@ -272,6 +272,7 @@ export interface AiSettings {
   geminiModel: string;
   openaiModel: string;
   openaiBaseUrl: string;
+  gemInstructions: string;
   hasGeminiKey: boolean;
   hasOpenaiKey: boolean;
 }
@@ -534,4 +535,91 @@ export interface AdminOverview {
     }
   >;
   tickets: SupportTicket[];
+}
+
+export type ContractVerdict = 'APROVADO' | 'APROVADO_COM_RESSALVAS' | 'REPROVADO_SANEAMENTO';
+export type ContractChecklistStatus = 'CONFORME' | 'RESSALVA' | 'NAO_CONFORME';
+export type ContractSourceType = 'UPLOAD' | 'TEXT' | 'PROCESS_PIECE';
+export type ContractSourceFormat = 'PDF' | 'WORD' | 'TXT' | 'HTML';
+
+export interface ContractChecklistItem {
+  id: string;
+  inciso: string;
+  item: string;
+  artigo: string;
+  status: ContractChecklistStatus;
+  observacao: string;
+  recomendacao?: string;
+}
+
+export interface ContractExtractedMetadata {
+  numero_contrato: string | null;
+  processo_referencia: string | null;
+  objeto: string | null;
+  contratante: string | null;
+  cnpj_contratante: string | null;
+  contratada: string | null;
+  cnpj_contratada: string | null;
+  representante_contratante: string | null;
+  representante_cargo: string | null;
+  valor_global: string | null;
+  valores_em_aberto: boolean;
+  vigencia_prazo: string | null;
+  duracao_em_aberto: boolean;
+  indice_reajuste: string | null;
+  data_base_orcamento: string | null;
+  garantia_contratual: string | null;
+  foro: string | null;
+  regime_legal_detectado: 'LEI_14133' | 'MISTO_LEGADO' | 'LEI_8666_LEGADO' | 'NAO_IDENTIFICADO';
+}
+
+export interface ContractRiskFinding {
+  id: string;
+  severity: 'critical' | 'warning' | 'info';
+  categoria: string;
+  artigo: string;
+  titulo: string;
+  descricao: string;
+  trecho_identificado?: string;
+  recomendacao: string;
+}
+
+export interface ContractSuggestedClause {
+  clausula: string;
+  artigo: string;
+  motivo: string;
+  texto_sugerido: string;
+}
+
+export interface ContractAnalysisRecord {
+  id: string;
+  owner_user_id: string;
+  process_id?: string | null;
+  title: string;
+  source_type: ContractSourceType;
+  source_filename?: string | null;
+  source_format?: ContractSourceFormat | null;
+  contract_text: string;
+  analysis_focus?: string;
+  institution_name?: string | null;
+  verdict: ContractVerdict;
+  compliance_score: number;
+  summary: string;
+  extracted_metadata: ContractExtractedMetadata;
+  checklist_art92: ContractChecklistItem[];
+  risk_findings: ContractRiskFinding[];
+  suggested_clauses: ContractSuggestedClause[];
+  tcu_precedents: TcuPrecedent[];
+  report_html: string;
+  ai_provider_used: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractExtractionPreview {
+  filename: string;
+  format: ContractSourceFormat;
+  char_count: number;
+  extracted_text: string;
+  diagnostics: string[];
 }

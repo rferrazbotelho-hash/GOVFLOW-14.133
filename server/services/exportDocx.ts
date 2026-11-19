@@ -19,7 +19,7 @@ import {
   TextRun,
   WidthType
 } from 'docx';
-import type { AgentPiece, ProcessBundle } from '../../shared/types.js';
+import type { AgentPiece, ContractAnalysisRecord, Institution, ProcessBundle } from '../../shared/types.js';
 import {
   CANONICAL_DOCUMENT_FONT,
   CANONICAL_MONO_FONT,
@@ -779,4 +779,82 @@ export async function exportDossierZip(bundle: ProcessBundle): Promise<Buffer> {
   );
 
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
+export async function exportContractAnalysisDocx(
+  analysis: ContractAnalysisRecord,
+  institution?: Institution | null
+): Promise<Buffer> {
+  const orgTitle =
+    institution?.razao_social ||
+    analysis.institution_name ||
+    analysis.extracted_metadata.contratante ||
+    'GOVFLOW 14.133 — Controladoria & Procuradoria';
+
+  const headerPara = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: '071D41' } },
+    spacing: { after: 100 },
+    children: [
+      new TextRun({
+        text: normalizeUtf8Text(orgTitle.toUpperCase()),
+        font: CANONICAL_DOCUMENT_FONT,
+        bold: true,
+        size: 18,
+        color: '071D41'
+      }),
+      new TextRun({
+        break: 1,
+        text: normalizeUtf8Text('Análise Técnica e Jurídica de Contratos Administrativos — Lei nº 14.133/2021 (Art. 92)'),
+        font: CANONICAL_DOCUMENT_FONT,
+        size: 15,
+        color: '475569'
+      })
+    ]
+  });
+
+  const footerPara = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    border: { top: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' } },
+    spacing: { before: 80 },
+    children: [
+      new TextRun({
+        text: normalizeUtf8Text(`GOVFLOW 14.133 — Análise de Contrato (${analysis.title}) | Página `),
+        font: CANONICAL_DOCUMENT_FONT,
+        size: 16,
+        color: '475569'
+      }),
+      new TextRun({ children: [PageNumber.CURRENT], font: CANONICAL_DOCUMENT_FONT, size: 16, color: '475569' }),
+      new TextRun({ text: ' de ', font: CANONICAL_DOCUMENT_FONT, size: 16, color: '475569' }),
+      new TextRun({ children: [PageNumber.TOTAL_PAGES], font: CANONICAL_DOCUMENT_FONT, size: 16, color: '475569' })
+    ]
+  });
+
+  const doc = new Document({
+    styles: createDocxDocumentStyles(),
+    sections: [
+      {
+        properties: A4_SECTION_PROPERTIES,
+        headers: { default: new Header({ children: [headerPara] }) },
+        footers: { default: new Footer({ children: [footerPara] }) },
+        children: [
+          new Paragraph({
+            spacing: { after: 100 },
+            children: [
+              new TextRun({
+                text: normalizeUtf8Text(`Parecer de Auditoria Contratual — Conformidade: ${analysis.compliance_score}% (${analysis.verdict}) | Motor: ${analysis.ai_provider_used}`),
+                font: CANONICAL_DOCUMENT_FONT,
+                size: 18,
+                color: '1351B4',
+                italics: true
+              })
+            ]
+          }),
+          ...htmlToDocxBlocks(analysis.report_html)
+        ]
+      }
+    ]
+  });
+
+  return Buffer.from(await Packer.toBuffer(doc));
 }

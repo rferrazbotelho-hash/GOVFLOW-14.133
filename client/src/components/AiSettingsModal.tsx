@@ -30,10 +30,10 @@ const PROVIDER_OPTIONS: {
 }[] = [
   {
     id: 'auto',
-    title: 'Automático (Gemini Zero-Token + Fallback Local)',
+    title: 'Automático (Gemini / OpenAI + Fallback Local)',
     badge: 'Recomendado',
     description:
-      'Detecta automaticamente GEMINI_API_KEY, GOOGLE_API_KEY, arquivo .env ou Google Cloud ADC (gcloud auth application-default login) sem digitar token na tela. Se não houver credencial externa, opera via Motor Local 14.133.'
+      'Detecta automaticamente GEMINI_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY, arquivo .env ou Google Cloud ADC sem exigir digitação manual. Se não houver credencial externa, opera via Motor Local 14.133.'
   },
   {
     id: 'local',
@@ -55,6 +55,13 @@ const PROVIDER_OPTIONS: {
   }
 ];
 
+const DEFAULT_GEM_TEMPLATE = `Você é um especialista na estruturação de documentos oficiais administrativos e jurídicos sob a Lei Federal nº 14.133/2021.
+Siga rigorosamente a estrutura padrão institucional do GOVFLOW 14.133:
+- Linguagem técnico-jurídica formal, impessoal, clara e objetiva;
+- Início com Ficha Técnica em tabela de 2 colunas e Síntese Executiva destacada;
+- Cláusulas e seções numeradas com fundamentação estrita nos artigos da Lei nº 14.133/2021 e jurisprudência do TCU;
+- Preservação absoluta dos dados reais do certame, orçamento e assinaturas exclusivas.`;
+
 export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalProps) {
   const [provider, setProvider] = useState<AiProviderMode>(settings.provider || 'auto');
   const [geminiModel, setGeminiModel] = useState(settings.geminiModel || 'gemini-4-hydrogen');
@@ -64,6 +71,7 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
     settings.openaiBaseUrl || 'https://api.openai.com/v1'
   );
   const [openaiApiKey, setOpenaiApiKey] = useState('');
+  const [gemInstructions, setGemInstructions] = useState(settings.gemInstructions || '');
   const [showManualKey, setShowManualKey] = useState(false);
 
   const [saving, setSaving] = useState(false);
@@ -83,7 +91,8 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
         geminiApiKey: geminiApiKey ? geminiApiKey : undefined,
         openaiModel,
         openaiBaseUrl,
-        openaiApiKey: openaiApiKey ? openaiApiKey : undefined
+        openaiApiKey: openaiApiKey ? openaiApiKey : undefined,
+        gemInstructions
       });
       onSaved(updated);
       setGeminiApiKey('');
@@ -207,12 +216,21 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
                 <span className="font-semibold">Origem detectada:</span>{' '}
                 <span>{settings.authSourceLabel}</span>
               </p>
-              {settings.geminiAuthDetail && (
+              {!isOpenaiActive && settings.geminiAuthDetail && (
                 <p className="text-[11px] text-slate-600">{settings.geminiAuthDetail}</p>
               )}
               <p className="text-[11px] text-slate-500">
                 Código de origem: <code>{settings.authSource}</code> · Política:{' '}
-                <code>{settings.provider}</code> · Modelo Gemini: <code>{settings.geminiModel}</code>
+                <code>{settings.provider}</code> ·{' '}
+                {isOpenaiActive ? (
+                  <>
+                    Modelo OpenAI: <code>{settings.openaiModel}</code>
+                  </>
+                ) : (
+                  <>
+                    Modelo Gemini: <code>{settings.geminiModel}</code>
+                  </>
+                )}
               </p>
             </div>
 
@@ -336,8 +354,8 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
                   {[
                     { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen (Padrão)' },
                     { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
-                    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
-                    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' }
+                    { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
+                    { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite' }
                   ].map((preset) => (
                     <button
                       key={preset.id}
@@ -437,7 +455,7 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Modelo</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Modelo OpenAI</label>
                 <input
                   type="text"
                   value={openaiModel}
@@ -445,11 +463,36 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"
                   placeholder="gpt-4o-mini"
                 />
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {[
+                    { id: 'gpt-4o-mini', label: 'gpt-4o-mini (Rápido)' },
+                    { id: 'gpt-4o', label: 'gpt-4o' },
+                    { id: 'gpt-4.1-mini', label: 'gpt-4.1-mini' },
+                    { id: 'gpt-4.1', label: 'gpt-4.1' },
+                    { id: 'gpt-5-mini', label: 'gpt-5-mini' },
+                    { id: 'gpt-5', label: 'gpt-5' }
+                  ].map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => setOpenaiModel(preset.id)}
+                      className={`px-2 py-1 rounded text-[11px] font-medium border cursor-pointer ${
+                        openaiModel === preset.id
+                          ? 'bg-blue-50 border-blue-600 text-blue-800'
+                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   API Key{' '}
-                  {settings.hasOpenaiKey ? '(Chave detectada)' : '(Opcional — fallback Local)'}
+                  {settings.hasOpenaiKey
+                    ? '(Chave ativa via .env ou configuração salva)'
+                    : '(Opcional — fallback Local)'}
                 </label>
                 <input
                   type="password"
@@ -457,12 +500,72 @@ export function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalP
                   onChange={(e) => setOpenaiApiKey(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"
                   placeholder={
-                    settings.hasOpenaiKey ? '•••••••• (deixe vazio para manter)' : 'sk-...'
+                    settings.hasOpenaiKey ? '•••••••• (deixe vazio para manter a atual)' : 'sk-proj-...'
                   }
                 />
+                {settings.hasOpenaiKey && (
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={async () => {
+                      setSaving(true);
+                      setError('');
+                      try {
+                        const updated = await api.updateAiSettings({ openaiApiKey: '' });
+                        onSaved(updated);
+                        setOpenaiApiKey('');
+                        setTestResult(await api.testAiSettings());
+                      } catch (err: any) {
+                        setError(err.message || 'Falha ao remover chave OpenAI salva.');
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}
+                    className="mt-1.5 text-[11px] font-semibold text-red-700 hover:underline cursor-pointer"
+                  >
+                    Remover chave salva do usuário e usar apenas .env / fallback
+                  </button>
+                )}
               </div>
             </div>
           )}
+
+          {/* Instruções Personalizadas do Gem (System Instruction Padrão) */}
+          <div className="space-y-2 bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                Instruções do Gem (System Instruction Padrão)
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setGemInstructions(DEFAULT_GEM_TEMPLATE)}
+                  className="text-[11px] font-semibold text-blue-700 hover:underline cursor-pointer"
+                >
+                  Carregar Modelo Padrão (Gem Oficial 14.133)
+                </button>
+                {gemInstructions.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setGemInstructions('')}
+                    className="text-[11px] font-semibold text-slate-500 hover:text-red-700 cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-600">
+              Diretriz persistida por usuário e injetada como <code>systemInstruction</code> nos 11 agentes e na Análise de Contratos (compatível com Gemini 4 Hydrogen e OpenAI).
+            </p>
+            <textarea
+              rows={4}
+              value={gemInstructions}
+              onChange={(e) => setGemInstructions(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs bg-white leading-relaxed"
+              placeholder="Ex.: Você é um especialista na estruturação de documentos oficiais. Siga rigorosamente a estrutura padrão institucional..."
+            />
+          </div>
 
           {error && (
             <div className="rounded-lg bg-red-50 border border-red-200 text-red-800 px-3 py-2 text-xs">

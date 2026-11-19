@@ -12,6 +12,7 @@ import { Sidebar, type AppView } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
 import { InstitutionSetupView } from './components/InstitutionSetupView';
 import { ProcessWorkspaceView } from './components/ProcessWorkspaceView';
+import { ContractAnalysisView } from './components/ContractAnalysisView';
 import { AdminPanelView } from './components/AdminPanelView';
 import { CertameConfigModal } from './components/CertameConfigModal';
 import { AiSettingsModal } from './components/AiSettingsModal';
@@ -228,6 +229,13 @@ export function App() {
             activeInstitutionId={activeInstitution?.id || ''}
             onSelectInstitution={setActiveInstitutionId}
             onInstitutionUpdated={handleInstitutionUpdated}
+          />
+        )}
+
+        {activeView === 'contracts' && (
+          <ContractAnalysisView
+            activeInstitution={activeInstitution}
+            processes={processes}
           />
         )}
 

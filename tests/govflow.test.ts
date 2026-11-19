@@ -14,6 +14,11 @@ import JSZip from 'jszip';
 // Configura banco temporário isolado antes de importar módulos que usam getDb()
 const tmpDbPath = path.join(os.tmpdir(), `govflow-test-${Date.now()}.db`);
 process.env.GOVFLOW_DB_PATH = tmpDbPath;
+process.env.GOVFLOW_IGNORE_DOTENV = '1';
+delete process.env.AI_PROVIDER;
+delete process.env.OPENAI_API_KEY;
+delete process.env.GEMINI_API_KEY;
+delete process.env.GOOGLE_API_KEY;
 
 import { getDataDir, getDb, isServerlessRuntime } from '../server/db/database.js';
 import {
@@ -51,7 +56,9 @@ import {
 } from '../server/services/promptRegistry.js';
 import {
   buildGeminiGenerationConfig,
+  buildOpenAiChatBody,
   parseJsonPayload,
+  testAiConnectivity,
   tryGenerateWithLlm
 } from '../server/services/llmClient.js';
 import { generateConsolidatedPdf } from '../server/services/exportPdf.js';
@@ -1469,27 +1476,33 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(resetJson.settings.effectiveProvider).toBe('local');
       expect(resetJson.diagnostic.ok).toBe(true);
 
-      // Modelo padrão Gemini 4 Hydrogen + normalização de alias + generationConfig Gemini 4
+      // Modelo padrão Gemini 4 Hydrogen + normalização de alias + migração de legado (gemini-2.5-pro -> gemini-4-hydrogen)
       expect(DEFAULT_GEMINI_MODEL).toBe('gemini-4-hydrogen');
       expect(normalizeGeminiModelName('4 hydrogen')).toBe('gemini-4-hydrogen');
       expect(normalizeGeminiModelName('models/gemini-4-hydrogen')).toBe('gemini-4-hydrogen');
+      expect(normalizeGeminiModelName('gemini-2.5-pro')).toBe('gemini-4-hydrogen');
+      expect(normalizeGeminiModelName('2.5 pro')).toBe('gemini-4-hydrogen');
       const g4Cfg = buildGeminiGenerationConfig('gemini-4-hydrogen');
       expect(g4Cfg.maxOutputTokens).toBe(32768);
       expect(g4Cfg.thinkingConfig?.thinkingLevel).toBe('MEDIUM');
       expect(g4Cfg.temperature).toBeUndefined();
 
+      const customGemText =
+        'Você é um especialista na estruturação de documentos oficiais. Siga rigorosamente a estrutura padrão.';
       const putModelRes = await apiFetch('/api/settings/ai', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider: 'gemini',
-          geminiModel: '4 hydrogen',
-          geminiApiKey: 'AIzaSyDummyValidKeyForUnitTest123'
+          geminiModel: 'gemini-2.5-pro',
+          geminiApiKey: 'AIzaSyDummyValidKeyForUnitTest123',
+          gemInstructions: customGemText
         })
       });
       expect(putModelRes.status).toBe(200);
       const putModelJson = (await putModelRes.json()) as any;
       expect(putModelJson.geminiModel).toBe('gemini-4-hydrogen');
+      expect(putModelJson.gemInstructions).toBe(customGemText);
 
       let capturedUrl = '';
       let capturedBody: any = null;
@@ -1529,6 +1542,8 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         }) as typeof fetch
       );
       expect(capturedUrl).toContain('/models/gemini-4-hydrogen:generateContent');
+      expect(capturedBody?.systemInstruction?.parts?.[0]?.text).toContain(customGemText);
+      expect(capturedBody?.systemInstruction?.parts?.[0]?.text).toContain('Especialista 14.133');
       expect(capturedBody?.generationConfig?.thinkingConfig?.thinkingLevel).toBe('MEDIUM');
       expect(capturedBody?.generationConfig?.maxOutputTokens).toBe(32768);
       expect(capturedBody?.generationConfig?.temperature).toBeUndefined();
@@ -1540,9 +1555,9 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
         else process.env[k] = v;
       }
       clearGeminiAuthCache();
-      getDb().prepare("DELETE FROM app_settings WHERE key IN ('ai_provider', 'gemini_api_key', 'gemini_model')").run();
+      getDb().prepare("DELETE FROM app_settings WHERE key IN ('ai_provider', 'gemini_api_key', 'gemini_model', 'gem_instructions')").run();
       getDb()
-        .prepare("DELETE FROM user_settings WHERE user_id = ? AND key IN ('ai_provider', 'gemini_api_key', 'gemini_model')")
+        .prepare("DELETE FROM user_settings WHERE user_id = ? AND key IN ('ai_provider', 'gemini_api_key', 'gemini_model', 'gem_instructions')")
         .run(adminUser.id);
       fs.rmSync(emptyCfg, { recursive: true, force: true });
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -2337,6 +2352,385 @@ describe('GOVFLOW 14.133 — Testes Integrados de Arquitetura, Regras Legais, Ag
       expect(deactRes.status).toBe(200);
       expect((await userBFetch('/api/processes')).status).toBe(401);
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it(
+    'módulo de Análise de Contratos: extrai PDF e DOCX, detecta vícios da Lei 14.133/2021 (Art. 92/191/156), audita Peça 07, exporta Word/PDF e isola por usuário',
+    async () => {
+      const app = createApp();
+      const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+        const s = app.listen(0, '127.0.0.1', () => resolve(s));
+      });
+
+      try {
+        const address = server.address() as { port: number };
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        const { authFetch: adminFetch } = await createAuthedFetch(baseUrl);
+
+        // 0. Rotas exigem autenticação
+        expect((await fetch(`${baseUrl}/api/contracts/analyses`)).status).toBe(401);
+
+        // 1. Cria contrato em .docx com vícios propositais (Lei 8.666/93 + multa 40% + sem reserva PcD + data-base errada)
+        const flawedContractText = [
+          'CONTRATO ADMINISTRATIVO Nº 077/2026 — PROCESSO LICITATÓRIO Nº 022/2026',
+          'O MUNICÍPIO DE HORIZONTE AZUL, CNPJ 18.349.894/0001-95, representado pelo Secretário Municipal de Obras, contrata ALFA CONSTRUÇÕES LTDA, CNPJ 22.333.444/0001-55, com fundamento na Lei nº 8.666/1993 e subsidiariamente Lei nº 14.133/2021.',
+          'CLÁUSULA PRIMEIRA – DO OBJETO: Execução de serviços contínuos de manutenção predial.',
+          'CLÁUSULA SEGUNDA – DA VIGÊNCIA: 12 meses contados da assinatura.',
+          'CLÁUSULA TERCEIRA – DO VALOR: R$ 250.000,00 pagos mediante nota fiscal.',
+          'CLÁUSULA QUARTA – DO REAJUSTE: Reajuste pelo IPCA/IBGE com data-base na assinatura do contrato.',
+          'CLÁUSULA QUINTA – DAS PENALIDADES: Multa de 40% sobre o valor global em caso de atraso.',
+          'CLÁUSULA SEXTA – DA DOTAÇÃO ORÇAMENTÁRIA: Fonte 1500.'
+        ];
+
+        const docxDoc = new Document({
+          sections: [
+            {
+              children: flawedContractText.map((line) => new Paragraph({ text: line }))
+            }
+          ]
+        });
+        const docxBuf = Buffer.from(await Packer.toBuffer(docxDoc));
+
+        // 2. Testa pré-extração do DOCX via /api/contracts/extract
+        const fdExtract = new FormData();
+        fdExtract.append(
+          'file',
+          new Blob([docxBuf], {
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          }),
+          'contrato_viciado.docx'
+        );
+        const extractRes = await adminFetch('/api/contracts/extract', {
+          method: 'POST',
+          body: fdExtract
+        });
+        expect(extractRes.status).toBe(200);
+        const extractJson = (await extractRes.json()) as any;
+        expect(extractJson.format).toBe('WORD');
+        expect(extractJson.extracted_text).toContain('CONTRATO ADMINISTRATIVO Nº 077/2026');
+
+        // 3. Envia o DOCX diretamente para análise completa em /api/contracts/analyze
+        const fdAnalyze = new FormData();
+        fdAnalyze.append(
+          'file',
+          new Blob([docxBuf], {
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          }),
+          'contrato_viciado.docx'
+        );
+        fdAnalyze.append('analysis_focus', 'Auditar regime legal, multa e reserva PcD');
+
+        const analyzeDocxRes = await adminFetch('/api/contracts/analyze', {
+          method: 'POST',
+          body: fdAnalyze
+        });
+        expect(analyzeDocxRes.status).toBe(201);
+        const flawedAnalysis = (await analyzeDocxRes.json()) as any;
+
+        expect(flawedAnalysis.source_format).toBe('WORD');
+        expect(flawedAnalysis.verdict).toBe('REPROVADO_SANEAMENTO');
+        expect(flawedAnalysis.extracted_metadata.regime_legal_detectado).toBe('MISTO_LEGADO');
+        expect(flawedAnalysis.risk_findings.some((r: any) => r.id === 'risk-regime-legado')).toBe(true);
+        expect(flawedAnalysis.risk_findings.some((r: any) => r.id === 'risk-multa-ilegal')).toBe(true);
+        expect(flawedAnalysis.risk_findings.some((r: any) => r.id === 'risk-pcd-habilitacao')).toBe(true);
+        expect(flawedAnalysis.risk_findings.some((r: any) => r.id === 'risk-sem-pncp')).toBe(true);
+        expect(flawedAnalysis.suggested_clauses.length).toBeGreaterThanOrEqual(4);
+        expect(flawedAnalysis.tcu_precedents.length).toBeGreaterThanOrEqual(1);
+
+        // 4. Testa upload de contrato em PDF gerado via PDFKit
+        const pdfBuf = await new Promise<Buffer>((resolve, reject) => {
+          const pdf = new PDFKitDocument({ size: 'A4', margin: 40 });
+          const chunks: Buffer[] = [];
+          pdf.on('data', (c) => chunks.push(c));
+          pdf.on('end', () => resolve(Buffer.concat(chunks)));
+          pdf.on('error', reject);
+          pdf.fontSize(11).text(
+            'CONTRATO ADMINISTRATIVO Nº 088/2026 — REGIDO PELA LEI FEDERAL Nº 14.133/2021.\n' +
+              'Objeto: Fornecimento de materiais escolares conforme Termo de Referência e Edital vinculado.\n' +
+              'Vigência contratual de 12 meses, prorrogável conforme Arts. 105 a 107.\n' +
+              'Regime de execução: entrega parcelada mediante Ordem de Fornecimento.\n' +
+              'Pagamento em 30 dias na ordem cronológica (Art. 141) com atualização monetária pelo IPCA-E em atraso.\n' +
+              'Reajuste pelo IPCA/IBGE com data-base vinculada à data do orçamento estimado (Art. 25, § 7º).\n' +
+              'Prazo de resposta a pedidos de repactuação e reequilíbrio: 30 dias (Art. 92, X e XI).\n' +
+              'Recebimento provisório e definitivo conforme Art. 140. Dotação Orçamentária 01.02.339030.\n' +
+              'Matriz de Riscos Art. 103. Garantia de execução de 5% (Art. 96). Casos omissos Art. 92, III.\n' +
+              'Manutenção da habilitação e reserva de cargos para PcD, reabilitado e aprendiz (Art. 92, XVI e XVII).\n' +
+              'Gestor do contrato, fiscal técnico e preposto (Art. 117 e 118). LGPD Lei nº 13.709/2018.\n' +
+              'Sanções com multa até 20% e defesa prévia em 15 dias úteis (Arts. 155-163). Extinção Arts. 137-139.\n' +
+              'Divulgação obrigatória no PNCP em 20 dias úteis (Art. 94). Foro da sede da Administração.'
+          );
+          pdf.end();
+        });
+
+        const fdPdf = new FormData();
+        fdPdf.append('file', new Blob([pdfBuf], { type: 'application/pdf' }), 'contrato_conforme.pdf');
+        const analyzePdfRes = await adminFetch('/api/contracts/analyze', {
+          method: 'POST',
+          body: fdPdf
+        });
+        expect(analyzePdfRes.status).toBe(201);
+        const compliantPdf = (await analyzePdfRes.json()) as any;
+        expect(compliantPdf.source_format).toBe('PDF');
+        expect(compliantPdf.compliance_score).toBe(100);
+        expect(compliantPdf.verdict).toBe('APROVADO');
+
+        // 5. Reanálise de contrato salvo e exportações Word (.docx) + PDF (.pdf)
+        const reanalyzeRes = await adminFetch(`/api/contracts/analyses/${flawedAnalysis.id}/reanalyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            analysis_focus: 'Revisão final antes da assinatura'
+          })
+        });
+        expect(reanalyzeRes.status).toBe(200);
+        const reanalyzed = (await reanalyzeRes.json()) as any;
+        expect(reanalyzed.analysis_focus).toBe('Revisão final antes da assinatura');
+
+        const docxExportRes = await adminFetch(`/api/contracts/analyses/${flawedAnalysis.id}/export/docx`);
+        expect(docxExportRes.status).toBe(200);
+        const docxExportBuf = Buffer.from(await docxExportRes.arrayBuffer());
+        expect(docxExportBuf.subarray(0, 2).toString('utf8')).toBe('PK');
+
+        const pdfExportRes = await adminFetch(`/api/contracts/analyses/${flawedAnalysis.id}/export/pdf`);
+        expect(pdfExportRes.status).toBe(200);
+        const pdfExportBuf = Buffer.from(await pdfExportRes.arrayBuffer());
+        expect(pdfExportBuf.subarray(0, 5).toString('utf8')).toBe('%PDF-');
+
+        // 6. Importa Peça 07 de um processo real do GOVFLOW e verifica conformidade integral
+        const procs = (await (await adminFetch('/api/processes')).json()) as any[];
+        expect(procs.length).toBeGreaterThanOrEqual(1);
+        const targetProcId = procs[0].id;
+        await adminFetch(`/api/processes/${targetProcId}/agents/execute-all`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ autoApprove: false })
+        });
+        const fromProcRes = await adminFetch('/api/contracts/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ process_id: targetProcId, agent_number: 7 })
+        });
+        expect(fromProcRes.status).toBe(201);
+        const fromProcAnalysis = (await fromProcRes.json()) as any;
+        expect(fromProcAnalysis.source_type).toBe('PROCESS_PIECE');
+        expect(fromProcAnalysis.extracted_metadata.valores_em_aberto).toBe(true);
+        expect(fromProcAnalysis.extracted_metadata.duracao_em_aberto).toBe(true);
+        expect(fromProcAnalysis.compliance_score).toBe(100);
+        expect(fromProcAnalysis.verdict).toBe('APROVADO');
+
+        // 7. Isolamento por usuário: outro usuário ativo não acessa nem exclui análises do admin
+        const createUserRes = await adminFetch('/api/admin/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: 'auditor.contratos',
+            name: 'Auditor Contratos',
+            email: 'auditor@municipio.gov.br',
+            department: 'Controladoria',
+            role: 'USER',
+            is_active: true,
+            password: 'UserAudit123'
+          })
+        });
+        expect(createUserRes.status).toBe(201);
+        const { authFetch: userFetch } = await createAuthedFetch(
+          baseUrl,
+          'auditor.contratos',
+          'UserAudit123'
+        );
+        expect(((await (await userFetch('/api/contracts/analyses')).json()) as any[]).length).toBe(0);
+        expect((await userFetch(`/api/contracts/analyses/${flawedAnalysis.id}`)).status).toBe(403);
+        expect(
+          (await userFetch(`/api/contracts/analyses/${flawedAnalysis.id}`, { method: 'DELETE' })).status
+        ).toBe(403);
+
+        // Limpeza pelo proprietário
+        const delRes = await adminFetch(`/api/contracts/analyses/${flawedAnalysis.id}`, {
+          method: 'DELETE'
+        });
+        expect(delRes.status).toBe(200);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+    60000
+  );
+
+  it('integração OpenAI: detecta OPENAI_API_KEY sem sombreamento de DB vazio, valida modelos GPT-4o/GPT-5 e executa chat completions JSON', async () => {
+    const savedEnv = {
+      AI_PROVIDER: process.env.AI_PROVIDER,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      OPENAI_MODEL: process.env.OPENAI_MODEL,
+      OPENAI_BASE_URL: process.env.OPENAI_BASE_URL
+    };
+
+    const app = createApp();
+    const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+
+    try {
+      const address = server.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const { authFetch: adminFetch, user: adminUser } = await createAuthedFetch(baseUrl);
+
+      // 1. Verifica buildOpenAiChatBody para GPT-4o e GPT-5/o3
+      const gpt4Body = buildOpenAiChatBody('gpt-4o-mini', 'SYS', 'USR');
+      expect(gpt4Body.max_tokens).toBe(16384);
+      expect(gpt4Body.temperature).toBe(0.2);
+      expect(gpt4Body.response_format).toEqual({ type: 'json_object' });
+
+      const gpt5Body = buildOpenAiChatBody('gpt-5', 'SYS', 'USR');
+      expect(gpt5Body.max_completion_tokens).toBe(16384);
+      expect(gpt5Body.max_tokens).toBeUndefined();
+      expect(gpt5Body.temperature).toBeUndefined();
+
+      // 2. Chave vazia legada no SQLite nunca deve sombrear process.env.OPENAI_API_KEY
+      process.env.AI_PROVIDER = 'openai';
+      process.env.OPENAI_API_KEY = 'sk-proj-env-test-key-1234567890';
+      process.env.OPENAI_MODEL = 'gpt-4o-mini';
+      getDb()
+        .prepare(
+          'INSERT OR REPLACE INTO user_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)'
+        )
+        .run(adminUser.id, 'openai_api_key', '', new Date().toISOString());
+
+      const cfgEnv = (await (await adminFetch('/api/settings/ai')).json()) as any;
+      expect(cfgEnv.effectiveProvider).toBe('openai');
+      expect(cfgEnv.hasOpenaiKey).toBe(true);
+      expect(cfgEnv.openaiModel).toBe('gpt-4o-mini');
+
+      // 3. Rejeita chave mascarada com bullet points (•••) e limpa DB ao enviar vazio
+      const maskedRes = await adminFetch('/api/settings/ai', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'openai', openaiApiKey: '••••••' })
+      });
+      expect(maskedRes.status).toBe(400);
+
+      const updateRes = await adminFetch('/api/settings/ai', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'openai',
+          openaiModel: 'gpt-4o',
+          openaiApiKey: 'sk-proj-db-override-1234567890'
+        })
+      });
+      expect(updateRes.status).toBe(200);
+      const updatedJson = (await updateRes.json()) as any;
+      expect(updatedJson.effectiveProvider).toBe('openai');
+      expect(updatedJson.openaiModel).toBe('gpt-4o');
+
+      // 4. tryGenerateWithLlm dispara Bearer auth e parseia JSON da OpenAI
+      let capturedUrl = '';
+      let capturedAuth = '';
+      let capturedModel = '';
+      const mockFetch = (async (url: any, init: any) => {
+        capturedUrl = String(url);
+        capturedAuth = String(init?.headers?.Authorization || '');
+        const parsedReq = JSON.parse(String(init?.body || '{}'));
+        capturedModel = parsedReq.model;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    structured_json: { resumo_executivo: 'Contrato analisado via OpenAI GPT-4o.' },
+                    html_content: '<div class="gov-doc"><p>Parecer OpenAI válido.</p></div>',
+                    legal_alerts: [
+                      {
+                        severity: 'info',
+                        title: 'Auditoria OpenAI Concluída',
+                        article: 'Art. 92 da Lei nº 14.133/2021',
+                        message: 'Análise realizada via endpoint OpenAI.'
+                      }
+                    ]
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as typeof fetch;
+
+      const llmRes = await tryGenerateWithLlm(
+        {
+          userId: adminUser.id,
+          agentNumber: 10,
+          agentTitle: 'Teste OpenAI',
+          legalBasis: 'Lei nº 14.133/2021',
+          systemPrompt: 'Auditor',
+          userPrompt: 'Analise'
+        },
+        mockFetch
+      );
+
+      expect(llmRes).not.toBeNull();
+      expect(capturedUrl).toBe('https://api.openai.com/v1/chat/completions');
+      expect(capturedAuth).toBe('Bearer sk-proj-db-override-1234567890');
+      expect(capturedModel).toBe('gpt-4o');
+      expect(llmRes!.providerLabel).toBe('OpenAI (gpt-4o)');
+      expect(llmRes!.structured_json.resumo_executivo).toContain('OpenAI');
+
+      // 5. testAiConnectivity sonda /models + /chat/completions e diagnostica falta de créditos (HTTP 429)
+      const noCreditsProbe = await testAiConnectivity(adminUser.id, (async (url: any) => {
+        if (String(url).endsWith('/models')) {
+          return new Response(JSON.stringify({ data: [{ id: 'gpt-4o' }] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: 'You have no credits remaining.',
+              type: 'insufficient_quota',
+              code: 'insufficient_quota'
+            }
+          }),
+          { status: 429, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as typeof fetch);
+      expect(noCreditsProbe.ok).toBe(false);
+      expect(noCreditsProbe.errorCode).toBe('INSUFFICIENT_QUOTA');
+
+      const healthyProbe = await testAiConnectivity(adminUser.id, (async (url: any) => {
+        if (String(url).endsWith('/models')) {
+          return new Response(JSON.stringify({ data: [{ id: 'gpt-4o' }] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }) as typeof fetch);
+      expect(healthyProbe.ok).toBe(true);
+      expect(healthyProbe.effectiveProvider).toBe('openai');
+
+      // 6. Remover chave salva volta a usar env sem deixar '' no SQLite
+      const clearRes = await adminFetch('/api/settings/ai', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ openaiApiKey: '' })
+      });
+      expect(clearRes.status).toBe(200);
+      const clearJson = (await clearRes.json()) as any;
+      expect(clearJson.hasOpenaiKey).toBe(true);
+    } finally {
+      for (const [k, v] of Object.entries(savedEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      getDb()
+        .prepare("DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users)")
+        .run();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

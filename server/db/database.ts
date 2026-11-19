@@ -272,6 +272,33 @@ function migrateSchema(db: DatabaseSync) {
       created_at TEXT NOT NULL,
       FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS contract_analyses (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      process_id TEXT,
+      title TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'TEXT',
+      source_filename TEXT NOT NULL DEFAULT '',
+      source_format TEXT NOT NULL DEFAULT 'TXT',
+      contract_text TEXT NOT NULL,
+      analysis_focus TEXT NOT NULL DEFAULT '',
+      institution_name TEXT NOT NULL DEFAULT '',
+      verdict TEXT NOT NULL DEFAULT 'APROVADO_COM_RESSALVAS',
+      compliance_score INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      extracted_metadata_json TEXT NOT NULL DEFAULT '{}',
+      checklist_art92_json TEXT NOT NULL DEFAULT '[]',
+      risk_findings_json TEXT NOT NULL DEFAULT '[]',
+      suggested_clauses_json TEXT NOT NULL DEFAULT '[]',
+      tcu_precedents_json TEXT NOT NULL DEFAULT '[]',
+      report_html TEXT NOT NULL DEFAULT '',
+      ai_provider_used TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (process_id) REFERENCES processes(id) ON DELETE SET NULL
+    );
   `);
 
   // Migração segura de colunas adicionadas em bancos já existentes
@@ -317,6 +344,13 @@ function migrateSchema(db: DatabaseSync) {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_proc_created ON audit_logs(process_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_support_tickets_user ON support_tickets(user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_support_messages_ticket ON support_messages(ticket_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_contract_analyses_owner ON contract_analyses(owner_user_id, updated_at DESC);
+  `);
+
+  // Remove chaves vazias herdadas para nunca sombrearem variáveis de ambiente/.env
+  db.exec(`
+    DELETE FROM app_settings WHERE key IN ('openai_api_key', 'gemini_api_key') AND trim(value) = '';
+    DELETE FROM user_settings WHERE key IN ('openai_api_key', 'gemini_api_key') AND trim(value) = '';
   `);
 
   ensureDefaultAdminAndOwnership(db);

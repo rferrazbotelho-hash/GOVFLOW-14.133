@@ -133,6 +133,41 @@ export function buildGeminiGenerationConfig(model: string): Record<string, any> 
   };
 }
 
+export function buildOpenAiChatBody(
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  includeResponseFormat = true
+): Record<string, any> {
+  const isReasoningOrGpt5 = /^(o[134]|gpt-5)/i.test((model || '').trim());
+  const body: Record<string, any> = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ]
+  };
+  if (isReasoningOrGpt5) {
+    body.max_completion_tokens = 16384;
+  } else {
+    body.temperature = 0.2;
+    body.max_tokens = 16384;
+  }
+  if (includeResponseFormat) {
+    body.response_format = { type: 'json_object' };
+  }
+  return body;
+}
+
+export function buildEffectiveSystemInstruction(
+  baseSystemPrompt: string,
+  gemInstructions?: string
+): string {
+  const custom = (gemInstructions || '').trim();
+  if (!custom) return baseSystemPrompt;
+  return `[INSTRUÇÕES PERSONALIZADAS DO GEM / PADRÃO DOCUMENTAL]\n${custom}\n\n${baseSystemPrompt}`;
+}
+
 export async function tryGenerateWithLlm(
   req: LlmGenerationRequest,
   fetchFn: typeof fetch = fetch
@@ -142,6 +177,11 @@ export async function tryGenerateWithLlm(
   if (cfg.effectiveProvider === 'local') {
     return null;
   }
+
+  const effectiveSystemInstruction = buildEffectiveSystemInstruction(
+    req.systemPrompt,
+    cfg.gemInstructions
+  );
 
   const fullUserPrompt = `${req.userPrompt}
 
@@ -164,7 +204,7 @@ RETORNE EXCLUSIVAMENTE UM JSON VÁLIDO NO SEGUINTE FORMATO (sem texto fora do JS
     if (cfg.effectiveProvider === 'gemini' && cfg.geminiResolution.hasCredential) {
       const requestBody = JSON.stringify({
         systemInstruction: {
-          parts: [{ text: req.systemPrompt }]
+          parts: [{ text: effectiveSystemInstruction }]
         },
         contents: [
           {
@@ -222,41 +262,57 @@ RETORNE EXCLUSIVAMENTE UM JSON VÁLIDO NO SEGUINTE FORMATO (sem texto fora do JS
 
     if (cfg.effectiveProvider === 'openai' && cfg.openaiApiKey) {
       const endpoint = `${cfg.openaiBaseUrl.replace(/\/$/, '')}/chat/completions`;
-      const resp = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${cfg.openaiApiKey}`
-        },
-        signal: AbortSignal.timeout(90_000),
-        body: JSON.stringify({
-          model: cfg.openaiModel,
-          temperature: 0.2,
-          max_tokens: 16384,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: req.systemPrompt },
-            { role: 'user', content: fullUserPrompt }
-          ]
-        })
-      });
+      const callOpenAi = (includeResponseFormat: boolean) =>
+        fetchFn(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${cfg.openaiApiKey}`
+          },
+          signal: AbortSignal.timeout(120_000),
+          body: JSON.stringify(
+            buildOpenAiChatBody(
+              cfg.openaiModel,
+              effectiveSystemInstruction,
+              fullUserPrompt,
+              includeResponseFormat
+            )
+          )
+        });
+
+      let resp = await callOpenAi(true);
+      if (resp.status === 400) {
+        const err400 = await resp.text().catch(() => '');
+        if (/response_format/i.test(err400)) {
+          resp = await callOpenAi(false);
+        } else {
+          console.warn(`[GOVFLOW AI] OpenAI HTTP 400 (${cfg.openaiModel}): ${err400.slice(0, 180)}`);
+          return null;
+        }
+      }
 
       if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        console.warn(`[GOVFLOW AI] OpenAI HTTP ${resp.status} (${cfg.openaiModel}): ${errBody.slice(0, 180)}`);
         return null;
       }
 
       const json = (await resp.json()) as any;
       const text = String(json?.choices?.[0]?.message?.content || '');
-      return parseJsonPayload(text, `OpenAI/LLM (${cfg.openaiModel})`);
+      return parseJsonPayload(text, `OpenAI (${cfg.openaiModel})`);
     }
-  } catch {
+  } catch (err: any) {
+    console.warn(`[GOVFLOW AI] Falha na chamada LLM (${cfg.effectiveProvider}): ${err?.message || 'erro'}`);
     return null;
   }
 
   return null;
 }
 
-export async function testAiConnectivity(userId?: string): Promise<AiConnectivityTestResult> {
+export async function testAiConnectivity(
+  userId?: string,
+  fetchFn: typeof fetch = fetch
+): Promise<AiConnectivityTestResult> {
   reloadGeminiDotEnv();
   clearGeminiAuthCache();
   const cfg = getAiConfigRaw(userId);
@@ -362,31 +418,105 @@ export async function testAiConnectivity(userId?: string): Promise<AiConnectivit
   }
 
   try {
-    const endpoint = `${cfg.openaiBaseUrl.replace(/\/$/, '')}/models`;
-    const resp = await fetch(endpoint, {
+    const baseUrl = cfg.openaiBaseUrl.replace(/\/$/, '');
+    const modelsEndpoint = `${baseUrl}/models`;
+    const resp = await fetchFn(modelsEndpoint, {
       method: 'GET',
       headers: { Authorization: `Bearer ${cfg.openaiApiKey}` },
       signal: AbortSignal.timeout(12_000)
     });
 
-    if (resp.ok) {
+    const diagnoseOpenAiHttp = (
+      status: number,
+      errJson: { error?: { message?: string; code?: string; type?: string } } | null
+    ): AiConnectivityTestResult => {
+      const errMsg = errJson?.error?.message || '';
+      const rawCode = errJson?.error?.code || errJson?.error?.type || `HTTP_${status}`;
+      const isNoCredits =
+        status === 429 &&
+        (/no credits remaining|insufficient_quota|exceeded your current quota|billing/i.test(errMsg) ||
+          /insufficient_quota/i.test(rawCode));
+
+      const ptDetail =
+        status === 401
+          ? 'Chave API OpenAI inválida, expirada ou revogada (HTTP 401).'
+          : isNoCredits
+            ? 'Chave OpenAI autenticada, porém a conta está sem créditos de API/faturamento disponíveis (HTTP 429: sem saldo na organização).'
+            : status === 429
+              ? 'Limite de requisições da API OpenAI atingido (HTTP 429).'
+              : status === 404
+                ? `Modelo "${cfg.openaiModel}" ou endpoint não encontrado na OpenAI (HTTP 404).`
+                : `Endpoint OpenAI respondeu HTTP ${status}${errMsg ? `: ${errMsg.slice(0, 120)}` : ''}.`;
+
       return {
-        ok: true,
+        ok: false,
         provider: cfg.provider,
         effectiveProvider: 'openai',
         authSource: cfg.authSource,
         authSourceLabel: cfg.authSourceLabel,
-        message: `Conexão OpenAI / Compatível verificada com sucesso (${cfg.openaiModel}).`
+        errorCode: isNoCredits ? 'INSUFFICIENT_QUOTA' : rawCode,
+        message: `${ptDetail} Fallback para Motor Local 14.133 garantido.`,
+        hint:
+          status === 401
+            ? 'Confira sua OPENAI_API_KEY nas configurações ou no arquivo .env.'
+            : isNoCredits
+              ? 'Adicione créditos em https://platform.openai.com/settings/organization/billing/ para habilitar a geração real via OpenAI.'
+              : 'Verifique seu saldo/limites e o modelo selecionado na OpenAI, ou opere normalmente com o Motor Local 14.133.'
+      };
+    };
+
+    if (!resp.ok) {
+      const errJson = (await resp.json().catch(() => null)) as any;
+      return diagnoseOpenAiHttp(resp.status, errJson);
+    }
+
+    const body = (await resp.json().catch(() => null)) as { data?: Array<{ id?: string }> } | null;
+    const availableIds = Array.isArray(body?.data) ? body!.data.map((m) => String(m?.id || '')) : [];
+    const modelFound =
+      availableIds.length === 0 ||
+      availableIds.some((id) => id.toLowerCase() === cfg.openaiModel.toLowerCase());
+
+    if (!modelFound) {
+      return {
+        ok: false,
+        provider: cfg.provider,
+        effectiveProvider: 'openai',
+        authSource: cfg.authSource,
+        authSourceLabel: cfg.authSourceLabel,
+        errorCode: 'MODEL_NOT_FOUND',
+        message: `Chave OpenAI autenticada, porém o modelo "${cfg.openaiModel}" não apareceu na lista retornada por ${modelsEndpoint}.`,
+        hint: 'Selecione um modelo disponível como gpt-4o-mini, gpt-4o, gpt-4.1 ou gpt-5-mini.'
       };
     }
 
+    // Sonda 1-token em /chat/completions para confirmar cota/faturamento ativos além da autenticação
+    const isReasoning = /^(o[134]|gpt-5)/i.test(cfg.openaiModel);
+    const probeResp = await fetchFn(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${cfg.openaiApiKey}`
+      },
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({
+        model: cfg.openaiModel,
+        ...(isReasoning ? { max_completion_tokens: 1 } : { max_tokens: 1 }),
+        messages: [{ role: 'user', content: 'OK' }]
+      })
+    });
+
+    if (!probeResp.ok) {
+      const probeErr = (await probeResp.json().catch(() => null)) as any;
+      return diagnoseOpenAiHttp(probeResp.status, probeErr);
+    }
+
     return {
-      ok: false,
+      ok: true,
       provider: cfg.provider,
       effectiveProvider: 'openai',
       authSource: cfg.authSource,
       authSourceLabel: cfg.authSourceLabel,
-      message: `Endpoint OpenAI respondeu HTTP ${resp.status}. Fallback para Motor Local 14.133 garantido.`
+      message: `Conexão e faturamento OpenAI verificados com sucesso (${cfg.openaiModel}).`
     };
   } catch (err: any) {
     return {
@@ -395,7 +525,9 @@ export async function testAiConnectivity(userId?: string): Promise<AiConnectivit
       effectiveProvider: 'openai',
       authSource: cfg.authSource,
       authSourceLabel: cfg.authSourceLabel,
-      message: `Erro ao testar endpoint OpenAI (${err?.message || 'erro de rede'}). Fallback Local 14.133 garantido.`
+      errorCode: 'NETWORK_ERROR',
+      message: `Erro ao testar endpoint OpenAI (${err?.message || 'erro de rede'}). Fallback Local 14.133 garantido.`,
+      hint: 'Verifique acesso HTTPS ao endpoint api.openai.com e a URL configurada.'
     };
   }
 }

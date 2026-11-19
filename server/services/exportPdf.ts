@@ -3,7 +3,7 @@ import * as cheerio from 'cheerio';
 import puppeteer from 'puppeteer-core';
 import { PDFDocument } from 'pdf-lib';
 import PDFKitDocument from 'pdfkit';
-import type { AgentPiece, ProcessBundle } from '../../shared/types.js';
+import type { AgentPiece, ContractAnalysisRecord, Institution, ProcessBundle } from '../../shared/types.js';
 import {
   CANONICAL_UI_FONT_STACK,
   normalizeUtf8Text,
@@ -621,6 +621,102 @@ function generatePdfFallback(bundle: ProcessBundle, activePieces: AgentPiece[]):
       );
     }
 
+    doc.end();
+  });
+}
+
+export async function generateContractAnalysisPdf(
+  analysis: ContractAnalysisRecord,
+  institution?: Institution | null
+): Promise<Buffer> {
+  return runSerializedPdfTask(() => renderContractAnalysisPdfInternal(analysis, institution));
+}
+
+async function renderContractAnalysisPdfInternal(
+  analysis: ContractAnalysisRecord,
+  institution?: Institution | null
+): Promise<Buffer> {
+  const orgTitle =
+    institution?.razao_social ||
+    analysis.institution_name ||
+    analysis.extracted_metadata.contratante ||
+    'GOVFLOW 14.133 — Controladoria & Procuradoria';
+
+  const executablePath = findBrowserExecutable();
+  if (!executablePath) {
+    return generateContractAnalysisPdfFallback(analysis, orgTitle);
+  }
+
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+  try {
+    browser = await puppeteer.launch({
+      executablePath,
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
+    });
+    const page = await browser.newPage();
+    page.setDefaultTimeout(30_000);
+    try {
+      const headerTemplate = `
+      <div style="width:100%;font-family:'Segoe UI',Arial,sans-serif;font-size:8px;color:#334155;border-bottom:1.5px solid #071D41;padding:0 16mm 4px 16mm;display:flex;justify-content:space-between;box-sizing:border-box;">
+        <div><strong>${escapeHtml(orgTitle)}</strong> — Análise de Contratos (Lei nº 14.133/2021)</div>
+        <div>Conformidade: ${analysis.compliance_score}%</div>
+      </div>`;
+      const footerTemplate = `
+      <div style="width:100%;font-family:'Segoe UI',Arial,sans-serif;font-size:7.5px;color:#475569;border-top:1px solid #CBD5E1;padding:4px 16mm 0 16mm;display:flex;justify-content:space-between;box-sizing:border-box;">
+        <div>GOVFLOW 14.133 — Parecer Contratual (Art. 92)</div>
+        <div>Página <span class="pageNumber"></span> de <span class="totalPages"></span></div>
+      </div>`;
+      const fullHtml = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"/>${PDF_STYLES}</head><body>${normalizeUtf8Text(analysis.report_html)}</body></html>`;
+      await page.setContent(fullHtml, { waitUntil: 'load', timeout: 30_000 });
+      const pdfBytes = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        displayHeaderFooter: true,
+        headerTemplate,
+        footerTemplate,
+        margin: { top: '28mm', bottom: '20mm', left: '16mm', right: '16mm' }
+      });
+      return Buffer.from(pdfBytes);
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch {
+    return generateContractAnalysisPdfFallback(analysis, orgTitle);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+}
+
+function generateContractAnalysisPdfFallback(
+  analysis: ContractAnalysisRecord,
+  orgTitle: string
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFKitDocument({ size: 'A4', margin: 50, bufferPages: true });
+    const chunks: Buffer[] = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const fontPair = findUnicodeFontPair();
+    let regularFont = 'Helvetica';
+    let boldFont = 'Helvetica-Bold';
+    if (fontPair) {
+      doc.registerFont('DocRegular', fontPair.regular);
+      doc.registerFont('DocBold', fontPair.bold);
+      regularFont = 'DocRegular';
+      boldFont = 'DocBold';
+    }
+    const fmt = (text: unknown): string =>
+      fontPair ? normalizeUtf8Text(text) : normalizeWinAnsiFallback(text);
+
+    doc.font(boldFont).fontSize(14).fillColor('#071D41').text(fmt(orgTitle), { align: 'center' });
+    doc.font(regularFont).fontSize(9.5).fillColor('#1351B4').text(fmt(`GOVFLOW 14.133 — Análise de Contrato (${analysis.title})`), { align: 'center' });
+    doc.moveDown(1);
+    doc.font(regularFont).fontSize(10).fillColor('#1E293B').text(fmt(htmlToPlainText(analysis.report_html) || analysis.summary));
     doc.end();
   });
 }

@@ -62,14 +62,26 @@ const GEMINI_MODEL_ALIASES: Record<string, string> = {
   '4 argon': 'gemini-4-argon',
   '4-argon': 'gemini-4-argon',
   'gemini 4 argon': 'gemini-4-argon',
-  'gemini-4.0-argon': 'gemini-4-argon'
+  'gemini-4.0-argon': 'gemini-4-argon',
+  '4 carbon': 'gemini-4-carbon',
+  '4-carbon': 'gemini-4-carbon',
+  'gemini 4 carbon': 'gemini-4-carbon',
+  '2.5 pro': 'gemini-4-hydrogen',
+  '2.5 flash': 'gemini-4-hydrogen'
 };
 
 export function normalizeGeminiModelName(raw?: string): string {
   const stripped = (raw || '').trim().replace(/^models\//i, '').trim();
   if (!stripped) return DEFAULT_GEMINI_MODEL;
   const key = stripped.toLowerCase().replace(/\s+/g, ' ');
-  return GEMINI_MODEL_ALIASES[key] || stripped;
+  if (GEMINI_MODEL_ALIASES[key]) {
+    return GEMINI_MODEL_ALIASES[key];
+  }
+  // Modelos legados (gemini-2.5-*, gemini-2.0-*, gemini-1.5-*) são automaticamente migrados para gemini-4-hydrogen
+  if (/^gemini-(?:2\.5|2\.0|1\.5)(?:-|$)/i.test(key)) {
+    return DEFAULT_GEMINI_MODEL;
+  }
+  return stripped;
 }
 
 const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
@@ -83,7 +95,11 @@ const DOTENV_GEMINI_KEYS = [
   'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_CLOUD_QUOTA_PROJECT',
   'GOOGLE_CLOUD_PROJECT',
-  'GEMINI_MODEL'
+  'GEMINI_MODEL',
+  'GOVFLOW_GEM_INSTRUCTIONS',
+  'OPENAI_API_KEY',
+  'OPENAI_MODEL',
+  'OPENAI_BASE_URL'
 ] as const;
 
 // Tracks env keys populated from .env/.env.local so explicit test/shell overrides are preserved.
@@ -117,8 +133,10 @@ export function sanitizeGeminiApiKey(raw?: unknown): string {
   return cleaned;
 }
 
-export function validateManualGeminiApiKey(
-  raw: string
+function validateManualApiKey(
+  raw: string,
+  providerLabel: string,
+  fallbackHint: string
 ): { ok: true; key: string } | { ok: false; error: string } {
   const cleaned = stripOuterQuotes(raw);
   if (!cleaned) {
@@ -130,14 +148,41 @@ export function validateManualGeminiApiKey(
   if (cleaned.includes('•') || /^\*+$/.test(cleaned) || !/^[\x21-\x7E]{10,}$/.test(cleaned)) {
     return {
       ok: false,
-      error:
-        'Chave Gemini inválida: remova caracteres mascarados (•), espaços ou trechos truncados, ou deixe em branco para usar detecção automática (.env / ADC).'
+      error: `Chave ${providerLabel} inválida: remova caracteres mascarados (•), espaços ou trechos truncados, ou deixe em branco para usar detecção automática (${fallbackHint}).`
     };
   }
   return { ok: true, key: cleaned };
 }
 
+export function validateManualGeminiApiKey(raw: string) {
+  return validateManualApiKey(raw, 'Gemini', '.env / ADC');
+}
+
+export function validateManualOpenAiApiKey(raw: string) {
+  return validateManualApiKey(raw, 'OpenAI', '.env / ambiente');
+}
+
+export function resolveOpenAiApiKey(dbOpenAiKey?: string): {
+  apiKey: string;
+  fromDb: boolean;
+  hasDotEnvFile: boolean;
+} {
+  const dotEnv = readRuntimeDotEnv();
+  const hasDotEnvFile = hasAnyDotEnvFile();
+  const cleanDb = sanitizeGeminiApiKey(dbOpenAiKey);
+  if (cleanDb) {
+    return { apiKey: cleanDb, fromDb: true, hasDotEnvFile };
+  }
+  const envVal = sanitizeGeminiApiKey(getEffectiveEnvValue('OPENAI_API_KEY', dotEnv));
+  return { apiKey: envVal, fromDb: false, hasDotEnvFile };
+}
+
+export function getEffectiveAiEnvSetting(name: string): string {
+  return getEffectiveEnvValue(name, readRuntimeDotEnv());
+}
+
 function hasAnyDotEnvFile(cwd = process.cwd()): boolean {
+  if (process.env.GOVFLOW_IGNORE_DOTENV === '1') return false;
   return (
     fs.existsSync(path.resolve(cwd, '.env')) ||
     fs.existsSync(path.resolve(cwd, '.env.local'))
@@ -145,6 +190,7 @@ function hasAnyDotEnvFile(cwd = process.cwd()): boolean {
 }
 
 function readRuntimeDotEnv(): Record<string, string> {
+  if (process.env.GOVFLOW_IGNORE_DOTENV === '1') return {};
   const candidates = [
     path.resolve(process.cwd(), '.env'),
     path.resolve(process.cwd(), '.env.local')

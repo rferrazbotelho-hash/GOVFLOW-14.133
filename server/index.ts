@@ -13,6 +13,7 @@ import agentsRoutes from './routes/agents.js';
 import exportRoutes from './routes/export.js';
 import settingsRoutes from './routes/settings.js';
 import tcuRoutes from './routes/tcu.js';
+import contractsRoutes from './routes/contracts.js';
 import platformRoutes from './routes/platform.js';
 
 export function createApp() {
@@ -59,6 +60,7 @@ export function createApp() {
   app.use('/api', exportRoutes);
   app.use('/api', settingsRoutes);
   app.use('/api', tcuRoutes);
+  app.use('/api', contractsRoutes);
   app.use('/api', platformRoutes);
 
   const distDir = path.resolve(process.cwd(), 'dist');
